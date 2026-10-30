@@ -117,8 +117,8 @@ label.lbl{display:block;font-size:.76rem;text-transform:uppercase;letter-spacing
 .ptog{display:flex;flex-wrap:wrap;gap:4px}
 .ptog button{border:1px solid var(--line);background:var(--surface2);border-radius:7px;min-width:34px;padding:3px 0;font-family:var(--f-data);font-size:.8rem;color:var(--muted)}
 .ptog button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
-.longabs{display:flex;flex-direction:column;align-items:flex-start;gap:4px;background:var(--surface2);border-radius:10px;padding:8px 10px}
-.longabs input{width:100%}
+.longbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;background:var(--surface2);border-radius:10px;padding:8px 12px}
+.longform{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;flex-basis:100%}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .stat{background:var(--surface2);border-radius:10px;padding:8px 10px}
 .stat b{display:block;font-size:1.4rem;font-variant-numeric:tabular-nums;line-height:1.1}
@@ -1288,18 +1288,11 @@ function renderPlan() {
     <h2>Absent ${esc(M.days[di])}</h2>
     <div><label class="lbl" for="absAdd">Add a member of staff</label>
       <div class="addrow"><input type="text" id="absAdd" list="staffNames" placeholder="Start typing a name" autocomplete="off"><button class="btn primary" data-act="addAbs">Add</button></div>
-      <datalist id="staffNames">${names}</datalist>
-      <label class="row meta" style="margin-top:8px"><input type="checkbox" id="absLong"> Include in future cover (e.g. sick line submitted)</label>
-      <div id="absLongBox" class="stack" hidden style="margin-top:8px;gap:8px">
-        <div><label class="lbl" for="absBack">Expected back on</label><input type="date" id="absBack" min="${addDays(date, 1)}"><div class="meta">Leave blank if not known yet; they stay in the plan until you set it.</div></div>
-        <div><label class="lbl" for="absNote">Reason</label><input type="text" id="absNote" value="Sick line"></div></div></div>
+      <datalist id="staffNames">${names}</datalist></div>
     ${carry.length ? `<button class="btn small" data-act="carry">Bring forward ${carry.length} absence${carry.length > 1 ? 's' : ''} from ${esc(fmtDate(prev, { weekday: 'long' }))}</button>` : ''}
     ${absentIds.length ? absentIds.map(pid => {
       const p = M.byId[pid], a = absNow[pid], lg = longAbsOn(date, pid);
-      const long = lg ? `<div class="longabs"><span class="tag on">${esc(lg.note || 'Off for longer')}</span> <span class="meta">since ${esc(fmtDate(lg.from, { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
-          <label class="lbl" for="back-${pid}">Expected back on</label><input type="date" id="back-${pid}" class="backIn" data-pid="${pid}" min="${addDays(lg.from, 1)}" value="${esc(lg.back || '')}">
-          <span class="meta">${lg.back ? 'In the cover plan every school day until then.' : 'Return date not known: in the cover plan until it is set.'}</span>
-          <button class="linkbtn" data-act="backToday" data-pid="${pid}">Back today</button></div>` : '';
+      const long = lg ? `<div class="meta"><span class="tag on">${esc(lg.note || 'Off for longer')}</span> ${lg.back ? 'back ' + esc(fmtDate(lg.back, { weekday: 'short', day: 'numeric', month: 'short' })) : 'return date not set'}</div>` : '';
       return `<div class="abs"><div class="top"><span class="nm">${esc(p.name)}</span>${lg ? '' : `<button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button>`}</div>
         <div class="meta">${esc(p.depts.map(short).join(' · '))}</div>${long}
         <div class="ptog" role="group" aria-label="Periods absent">${ds.map(s => `<button data-act="togP" data-pid="${pid}" data-slot="${s}" aria-pressed="${absentAt(date, pid, s)}">${slotLabel(s)}</button>`).join('')}</div>
@@ -1344,7 +1337,20 @@ function teacherCard(pid, ds) {
   }).join('');
   const panel = UI.sel && UI.sel.pid === pid ? allocPanel(pid, UI.sel.slot) : '';
   return `<article class="tcard"><div class="thead"><h2>${esc(p.name)}</h2><span class="meta">${esc(p.depts.join(' · '))}${p.baseRoom ? ' · base room <span class="mono">' + esc(p.baseRoom) + '</span>' : ''}</span></div>
-    <div class="tiles" style="--n:${ds.length}">${tiles}</div>${panel}</article>`;
+    ${longBar(pid)}<div class="tiles" style="--n:${ds.length}">${tiles}</div>${panel}</article>`;
+}
+// Above the classes: put someone into future cover (e.g. a sick line), or show and change how long they are off
+function longBar(pid) {
+  const date = UI.date, lg = longAbsOn(date, pid);
+  if (lg) return `<div class="longbar"><span class="tag on">${esc(lg.note || 'Off for longer')}</span><span class="meta">Off since ${esc(fmtDate(lg.from, { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
+    <label class="row meta" for="back-${pid}">Expected back on <input type="date" id="back-${pid}" class="backIn" data-pid="${pid}" min="${addDays(lg.from, 1)}" value="${esc(lg.back || '')}"></label>
+    <span class="meta">${lg.back ? 'In the cover plan every school day until then.' : 'Return date not known: in the cover plan until it is set.'}</span>
+    <button class="btn small" data-act="backToday" data-pid="${pid}">Back today</button></div>`;
+  return `<div class="longbar"><label class="row meta"><input type="checkbox" class="longTog" data-pid="${pid}"> Include in future cover (e.g. sick line submitted)</label>
+    <div class="longform" id="longform-${pid}" hidden><label class="row meta">Expected back on <input type="date" id="absBack-${pid}" min="${addDays(date, 1)}"></label>
+      <label class="row meta">Reason <input type="text" id="absNote-${pid}" value="Sick line" style="width:12em"></label>
+      <button class="btn small primary" data-act="makeLong" data-pid="${pid}">Add to future cover</button>
+      <span class="meta">Leave the date blank if it isn't known yet; they stay in the plan until it is set.</span></div></div>`;
 }
 function candChip(c) {
   return `<span class="chip b-${c.band}">${esc(c.p.name)}${c.disc ? ' <span title="A department timetable shows this teacher busy this period">⚠</span>' : ''}</span>`;
@@ -1757,14 +1763,7 @@ document.addEventListener('click', e => {
     case 'addAbs': {
       const inp = document.getElementById('absAdd'); const p = inp.value.trim() && findPerson(inp.value);
       if (!p) { toast('No member of staff called "' + inp.value + '" in the master.'); return; }
-      if (document.getElementById('absLong').checked) {
-        const back = document.getElementById('absBack').value;
-        if (back && back <= date) { toast('The return date needs to be after ' + fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }) + '.'); return; }
-        S.settings.longAbs = S.settings.longAbs || {};
-        S.settings.longAbs[p.id] = { from: date, back: back || '', note: document.getElementById('absNote').value.trim() || 'Off for longer' };
-        toast(p.name + ' is in the cover plan ' + (back ? 'until ' + fmtDate(addDays(back, -1), { weekday: 'long', day: 'numeric', month: 'long' }) : 'until a return date is set') + '.');
-      } else plan(date, true).absent[p.id] = { periods: null };
-      save();
+      plan(date, true).absent[p.id] = { periods: null }; save();
       const di = dayIdx(date); const first = (M.dayPeriods[di] || []).find(s => needsCover(entryOf(p, s)) && !isLocked(p.id, s, date));
       UI.sel = first != null ? { pid: p.id, slot: first } : null; render(); break;
     }
@@ -1779,6 +1778,14 @@ document.addEventListener('click', e => {
       save(); render(); break;
     }
     case 'wholeDay': { const pl = plan(date, true); if (longAbsOn(date, pid)) delete pl.absent[pid]; else pl.absent[pid].periods = null; save(); render(); break; }
+    case 'makeLong': {
+      const back = document.getElementById('absBack-' + pid).value, pl = plan(date, true);
+      if (back && back <= date) { toast('The return date needs to be after ' + fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }) + '.'); return; }
+      S.settings.longAbs = S.settings.longAbs || {};
+      S.settings.longAbs[pid] = { from: date, back: back || '', note: document.getElementById('absNote-' + pid).value.trim() || 'Off for longer' };
+      if (pl.absent[pid] && !pl.absent[pid].periods) delete pl.absent[pid];   // whole day today: the longer absence covers it
+      save(); render(); toast(M.byId[pid].name + ' is in the cover plan ' + (back ? 'until ' + fmtDate(addDays(back, -1), { weekday: 'long', day: 'numeric', month: 'long' }) : 'until a return date is set') + '.'); break;
+    }
     case 'backToday': {
       const l = S.settings.longAbs[pid];
       if (date <= l.from) delete S.settings.longAbs[pid]; else l.back = date;
@@ -1870,7 +1877,7 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'dateIn' && t.value) setDate(t.value);
-  else if (t.id === 'absLong') document.getElementById('absLongBox').hidden = !t.checked;
+  else if (t.classList.contains('longTog')) document.getElementById('longform-' + t.dataset.pid).hidden = !t.checked;
   else if (t.classList.contains('backIn')) {
     const l = S.settings.longAbs[t.dataset.pid]; if (!l) return;
     if (t.value && t.value <= l.from) { toast('The return date needs to be after they went off.'); t.value = l.back || ''; return; }
