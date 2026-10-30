@@ -1040,6 +1040,13 @@ function buildModel() {
   applyStaffEdits(people, slots);
   const byId = {}; people.forEach(p => byId[p.id] = p);
   const dayPeriods = days.map((_, d) => slots.map((s, i) => s.day === d ? i : -1).filter(i => i >= 0));
+  // Part-time staff: a day with no classes is a day they don't work (some masters leave it blank instead of marking it "."),
+  // so it isn't counted as free periods and they aren't offered as cover that day
+  people.forEach(p => {
+    p.offDays = p.fte > 0 && p.fte < 1 ? dayPeriods.map((ds, d) => ds.every(s => !p.cells[s] || p.cells[s].out) && ds.some(s => !p.cells[s]) ? d : -1).filter(d => d >= 0) : [];
+    const blank = p.offDays.reduce((n, d) => n + dayPeriods[d].filter(s => !p.cells[s]).length, 0);
+    if (blank) { p.free -= blank; p.inSchool -= blank; p.allowance = p.free - p.ent; }
+  });
   const roomUse = slots.map(() => new Set()), rooms = new Set();
   people.forEach(p => {
     if (p.baseRoom) rooms.add(p.baseRoom);
@@ -1214,7 +1221,7 @@ function candidates(date, absentId, slot) {
   const absentRole = promotedRole(M.byId[absentId]);
   for (const p of M.people) {
     if (p.id === absentId || !coverable(p)) continue;
-    if (absentAt(date, p.id, slot) || phasedOn(date, p.id)) continue;
+    if (absentAt(date, p.id, slot) || phasedOn(date, p.id) || p.offDays.includes(day)) continue;
     if (p.cells[slot]) continue;
     const covers = coverSlotsOn(date, p.id, key);
     if (covers.includes(slot)) continue;
