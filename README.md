@@ -1,19 +1,26 @@
 # HGS Cover Planner
 
-A cover planner that runs straight from a shared OneDrive folder. It needs no internet connection and no server. Everything it saves stays in that folder.
+A cover planner that runs straight from the shared OneDrive folder that holds the timetables. It needs no internet connection and no server, and no staff data is built in. It reads the master and department timetables from the folder and saves plans to a data file there.
 
-## Setting it up (once)
+## Setting it up (once per computer)
 
-1. Put `HGS_Cover_Planner.html` in a OneDrive folder and share the folder with your colleagues.
-2. Each colleague opens the shared folder in OneDrive on the web and chooses **Add shortcut to My files**, so the folder syncs to their computer.
-3. Open the planner from the synced folder in File Explorer, using **Microsoft Edge or Google Chrome**. Opening it from the OneDrive website won't work.
-4. The first person goes to **Timetables → Shared data file → Create a data file** and saves `HGS Cover Planner data.json` in the same folder.
-5. Everyone else goes to **Timetables → Shared data file → Open an existing data file** and picks that file.
+1. Put `HGS_Cover_Planner.html` in the shared OneDrive timetables folder, or anywhere you like.
+2. Make sure the shared folder syncs to the computer. If it was shared with you, open it on the OneDrive website and choose **Add shortcut to My files**. In File Explorer, right-click the folder and choose **Always keep on this device**.
+3. Open the planner from File Explorer in **Microsoft Edge or Google Chrome**. Opening it from the OneDrive website won't work.
+4. Click **Link the timetables folder**, pick the shared folder, and allow the planner to view and save files there.
 
-After that, absences, cover, settings and uploaded timetables are shared. A colleague's changes appear within about 10 seconds. The browser may ask for permission to use the file again when you reopen the planner: choose **Allow on every visit** if it's offered.
+That's it. The planner:
+
+- uses the spreadsheet with "master" in its name as the master. You can choose a different one on the Timetables tab.
+- checks every other spreadsheet in the folder as a department timetable.
+- picks up changes within about 30 seconds of a spreadsheet being saved in Excel.
+- saves absences and cover to `HGS Cover Planner data.json` in the same folder, so everyone who links the folder sees the same plans.
+
+When you reopen the planner, the browser may ask for permission again. Choose **Allow on every visit** if it's offered, or click **Reconnect**.
 
 ## Good to know
 
 - It works on Windows or Mac computers, not phones or tablets.
-- If two people save within a few seconds of each other, the planner merges their changes. OneDrive can still occasionally make a conflict copy such as `HGS Cover Planner data-PCNAME.json`. If that happens, keep the main file and delete the copy.
-- To update the planner, replace `HGS_Cover_Planner.html` in the folder with the new version. The data file stays as it is.
+- Changes to a spreadsheet appear once they are saved and OneDrive has synced them.
+- OneDrive can occasionally make a conflict copy of the data file, such as `HGS Cover Planner data-PCNAME.json`. If that happens, keep the main file and delete the copy.
+- To update the planner, replace `HGS_Cover_Planner.html` with the new version. The data file and timetables stay as they are.

@@ -868,6 +868,104 @@ function unlinkFile(quiet) {
   idb('readwrite', s => s.delete('dataFile')).catch(() => { });
   render(); if (!quiet) toast('No longer using the data file. Changes are kept in this browser.');
 }
+/* ---------- shared timetables folder (OneDrive): the master and department timetables are read straight from it ----------
+   Nothing is copied: each spreadsheet is re-read whenever it is saved (checked every 30 s and when the window gets focus).
+   Linking the folder also keeps the shared data file in it, so colleagues only need to link the folder. */
+const DATA_NAME = 'HGS Cover Planner data.json';
+const FOLDER = { supported: typeof window.showDirectoryPicker === 'function' && !IN_FRAME, handle: null, name: '', ready: false, needsPermission: false, loading: false, busy: false, files: {} };
+let FV = { master: null, depts: [], sheets: [] };
+const slugify = n => String(n).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const isSheet = n => /\.(xlsx|xlsm|xls)$/i.test(n) && !n.startsWith('~$') && !n.startsWith('.');
+// Re-read changed spreadsheets; returns the names of files that changed since the last scan
+async function scanFolder() {
+  if (FOLDER.busy) return []; FOLDER.busy = true;
+  const changed = [];
+  try {
+    const seen = new Set();
+    for await (const h of FOLDER.handle.values()) {
+      if (h.kind !== 'file' || !isSheet(h.name)) continue;
+      seen.add(h.name);
+      const f = await h.getFile(), sig = f.lastModified + ':' + f.size, cur = FOLDER.files[h.name];
+      if (cur && cur.sig === sig) continue;
+      let parsed = null; try { parsed = await readWorkbook(f); } catch (e) { parsed = null; }
+      FOLDER.files[h.name] = { sig, lastModified: f.lastModified, parsed: parsed && parsed.length ? parsed : null };
+      if (cur) changed.push(h.name);
+    }
+    for (const n of Object.keys(FOLDER.files)) if (!seen.has(n)) { delete FOLDER.files[n]; changed.push(n); }
+    FOLDER.ready = true; FOLDER.needsPermission = false;
+  } catch (e) {
+    if (e && e.name === 'NotAllowedError') { FOLDER.ready = false; FOLDER.needsPermission = true; }
+    else toast('Could not read the timetables folder: ' + (e && e.message || e));
+  } finally { FOLDER.busy = false; }
+  return changed;
+}
+// The master is the spreadsheet chosen on the Timetables tab (shared through the data file), else the newest with "master" in its name
+function folderVersions() {
+  const all = Object.entries(FOLDER.files).filter(([, x]) => x.parsed).map(([file, x]) => ({ file, x }));
+  const masters = all.filter(a => /master/i.test(a.file)).sort((a, b) => b.x.lastModified - a.x.lastModified);
+  const chosen = all.find(a => a.file === S.settings.folderMaster) || masters[0] || null;
+  const mk = (a, kind) => ({ id: 'folder-' + slugify(a.file), kind, folder: true, file: a.file, name: a.file.replace(/\.[^.]+$/, ''), added: a.x.lastModified, parsed: a.x.parsed });
+  return { master: chosen ? mk(chosen, 'master') : null, depts: all.filter(a => a !== chosen).map(a => mk(a, 'dept')), sheets: all.map(a => a.file), unreadable: Object.keys(FOLDER.files).filter(n => !FOLDER.files[n].parsed) };
+}
+async function refreshFolder(announce) {
+  const changed = await scanFolder();
+  if (!announce || changed.length) { buildModel(); render(); }
+  if (announce && changed.length) toast(changed.map(n => n.replace(/\.[^.]+$/, '')).join(', ') + ' updated.');
+}
+async function checkFolder() { if (FOLDER.ready && !FOLDER.busy && !document.hidden) await refreshFolder(true); }
+setInterval(checkFolder, 30000);
+window.addEventListener('focus', checkFolder);
+async function useFolder(handle, first) {
+  Object.assign(FOLDER, { handle, name: handle.name, ready: false, needsPermission: false, loading: true, files: {} });
+  render();
+  await scanFolder();
+  FOLDER.loading = false;
+  // keep the shared data file in the folder unless this browser already uses another one
+  if (FOLDER.ready && first && !FILE.handle) {
+    try { await linkFile(await handle.getFileHandle(DATA_NAME, { create: true })); } catch (e) { toast('Could not set up ' + DATA_NAME + ': ' + (e && e.message || e)); }
+  }
+  buildModel(); render();
+}
+async function chooseFolder() {
+  try {
+    const h = await window.showDirectoryPicker({ id: 'hgs-timetables', mode: 'readwrite' });
+    try { await idb('readwrite', st => st.put(h, 'ttFolder')); } catch (e) { }
+    await useFolder(h, true);
+    if (FOLDER.ready) toast('Reading timetables from ' + FOLDER.name + '.');
+  } catch (e) { if (!e || e.name !== 'AbortError') toast(e && e.message || String(e)); }
+}
+async function restoreFolderLink() {
+  if (!FOLDER.supported) return;
+  let h; try { h = await idb('readonly', st => st.get('ttFolder')); } catch (e) { return; }
+  if (!h) return;
+  FOLDER.handle = h; FOLDER.name = h.name;
+  if (await h.queryPermission({ mode: 'readwrite' }) === 'granted') await useFolder(h, false);
+  else { FOLDER.needsPermission = true; render(); }
+}
+// One click asks again for whatever this browser needs: the folder, then the data file
+async function reconnectAll() {
+  if (FOLDER.needsPermission && await FOLDER.handle.requestPermission({ mode: 'readwrite' }) === 'granted') await useFolder(FOLDER.handle, false);
+  if (FILE.needsPermission) await reconnectFile();
+}
+function unlinkFolder() {
+  Object.assign(FOLDER, { handle: null, name: '', ready: false, needsPermission: false, loading: false, files: {} });
+  idb('readwrite', st => st.delete('ttFolder')).catch(() => { });
+  buildModel(); render(); toast('No longer reading the timetables folder.');
+}
+function folderPanel() {
+  if (!FOLDER.supported) return `<p class="note">${IN_FRAME ? 'Open the planner from the shared OneDrive folder in Microsoft Edge or Google Chrome to read timetables straight from that folder.' : 'Reading timetables from a folder needs Microsoft Edge or Google Chrome on a computer.'}</p>`;
+  if (!FOLDER.handle) return `<p class="note">Link the shared OneDrive folder that holds the master and department timetables. The planner reads them straight from there and picks up changes whenever someone saves a spreadsheet, so nobody needs to upload anything. Absences and cover are saved to ${esc(DATA_NAME)} in the same folder, so everyone who links the folder sees the same plans.</p>
+    <div class="row"><button class="btn primary" data-act="linkFolder">Link the timetables folder</button></div>`;
+  if (FOLDER.needsPermission) return `<p class="note">Linked to <b>${esc(FOLDER.name)}</b>. The planner needs your permission to read it again.</p>
+    <div class="row"><button class="btn primary" data-act="reconnectAll">Reconnect</button><button class="btn danger" data-act="unlinkFolder">Stop using it</button></div>`;
+  const when = t => new Date(t).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const opts = FV.sheets.map(n => `<option value="${esc(n)}" ${FV.master && FV.master.file === n ? 'selected' : ''}>${esc(n)}</option>`).join('');
+  return `<p class="note">Reading timetables from <b>${esc(FOLDER.name)}</b>${FOLDER.loading ? ' (reading…)' : ''}. Changes are picked up within about 30 seconds of a spreadsheet being saved.</p>
+    <div class="fields"><div><label class="lbl" for="folderMasterSel">Master timetable</label><select id="folderMasterSel"><option value="">${FV.sheets.length ? 'Choose the master…' : 'No timetables found'}</option>${opts}</select></div></div>
+    ${FV.master ? `<p class="meta">${esc(FV.master.file)} · last saved ${esc(when(FV.master.added))} · ${FV.master.parsed[0].rows.length} staff rows</p>` : ''}
+    <p class="meta">Every other spreadsheet in the folder is checked as a department timetable (listed below).${FV.unreadable.length ? ' Not timetables: ' + esc(FV.unreadable.join(', ')) + '.' : ''}</p>
+    <div class="row"><button class="btn" data-act="scanNow">Check for changes now</button><button class="btn" data-act="linkFolder">Use a different folder</button><button class="btn danger" data-act="unlinkFolder">Stop using it</button></div>`;
+}
 const UI = { date: null, tab: 'plan', sel: null, weekQ: '', staffQ: '', discQ: '' };
 let M = null;
 
@@ -896,9 +994,10 @@ function band(rem) { return rem <= 0 ? 'r' : rem <= 2 ? 'o' : rem <= 4 ? 'y' : '
 function uid() { return Math.random().toString(36).slice(2, 9); }
 
 /* ---------- model ---------- */
-// The master in use: the one chosen, else the built-in one (if the file has one), else the latest uploaded; null before any master is loaded
-function activeVersion() { const ms = S.versions.filter(v => v.kind === 'master'); return (S.activeMaster !== 'builtin' && ms.find(v => v.id === S.activeMaster)) || BUILTIN || ms[ms.length - 1] || null; }
+// The master in use: the linked folder's master, else the one chosen, else the built-in one (if the file has one), else the latest uploaded; null before any master is loaded
+function activeVersion() { if (FV.master) return FV.master; const ms = S.versions.filter(v => v.kind === 'master'); return (S.activeMaster !== 'builtin' && ms.find(v => v.id === S.activeMaster)) || BUILTIN || ms[ms.length - 1] || null; }
 function buildModel() {
+  FV = folderVersions();
   const v = activeVersion();
   if (!v) { M = { version: null, people: [], byId: {}, slots: [], days: [], dayPeriods: [], rooms: [], roomUse: [], disc: {}, discList: [], unmatched: [], depts: [] }; return; }
   const parsed = v.parsed[0];
@@ -915,7 +1014,7 @@ function buildModel() {
   rooms.delete('Base');
   const depts = []; people.forEach(p => p.depts.forEach(d => { if (!depts.includes(d)) depts.push(d); }));
   const disc = {}, discList = [], unmatched = [];
-  BUILTIN_DEPTS.forEach(v => { const o = (S.settings.scope || {})[v.id]; if (v.autoScope == null) v.autoScope = guessScope(v.name, v.parsed, depts); v.scope = o != null ? o : v.autoScope; });
+  BUILTIN_DEPTS.concat(FV.depts).forEach(v => { const o = (S.settings.scope || {})[v.id]; if (v.autoScope == null) v.autoScope = guessScope(v.name, v.parsed, depts); v.scope = o != null ? o : v.autoScope; });
   deptVersions().forEach(ver => ver.parsed.forEach(pp => {
     const r = TT.compare(people, slots, pp, ver.name, scopeDepts(ver, depts));
     r.items.forEach(it => { discList.push(it); (disc[it.id + '|' + it.slot] = disc[it.id + '|' + it.slot] || []).push(it); });
@@ -982,8 +1081,8 @@ function guessScope(name, parsed, depts) {
   if (!scope) { const ds = [...new Set(parsed.flatMap(x => x.rows.map(r => r.dept)))].filter(d => depts.includes(d)); const fs = [...new Set(ds.map(fac))]; if (ds.length === 1) scope = 'dept:' + ds[0]; else if (fs.length === 1) scope = 'fac:' + fs[0]; }
   return scope;
 }
-// Department timetables from the GitHub timetables folder (built in), then any uploaded here
-function deptVersions() { return BUILTIN_DEPTS.concat(S.versions.filter(v => v.kind === 'dept')); }
+// Department timetables built into the file, then from the linked folder, then any uploaded here
+function deptVersions() { return BUILTIN_DEPTS.concat(FV.depts, S.versions.filter(v => v.kind === 'dept')); }
 function scopeDepts(ver, depts) {
   const k = ver.scope || '';
   if (k.startsWith('fac:')) return depts.filter(d => fac(d) === k.slice(4));
@@ -1088,8 +1187,8 @@ function srcLine() {
   return `<div class="srcline noprint"><span>${M.version ? 'Working from <b>' + esc(M.version.name) + '</b>' : 'No master timetable loaded'}</span>
     <span>${depts ? depts + ' department timetable' + (depts > 1 ? 's' : '') + ' checked' : 'No department timetables loaded'}</span>
     ${M.discList.length ? `<button type="button" class="linkbtn" data-act="tab" data-tab="timetables">⚠ ${M.discList.length} possible discrepanc${M.discList.length > 1 ? 'ies' : 'y'}</button>` : ''}
-    <span>${FILE.ready ? 'Saving to <b>' + esc(FILE.name) + '</b>' : 'Saved in this browser only'}${FILE.supported && !FILE.handle ? ' · <button type="button" class="linkbtn" data-act="tab" data-tab="timetables">Set up a shared data file</button>' : ''}</span></div>`
-    + (FILE.needsPermission ? `<div class="banner noprint">The planner needs your permission to use <b>${esc(FILE.name)}</b> again. <button class="btn small primary" data-act="reconnectFile">Reconnect</button></div>` : '')
+    <span>${FILE.ready ? 'Saving to <b>' + esc(FILE.name) + '</b>' : 'Saved in this browser only'}${FOLDER.supported && !FOLDER.handle && !FILE.handle ? ' · <button type="button" class="linkbtn" data-act="tab" data-tab="timetables">Link the shared folder</button>' : ''}</span></div>`
+    + (FOLDER.needsPermission || FILE.needsPermission ? `<div class="banner noprint">The planner needs your permission to use <b>${esc(FOLDER.needsPermission ? FOLDER.name : FILE.name)}</b> again. <button class="btn small primary" data-act="reconnectAll">Reconnect</button></div>` : '')
     + (FILE.ready || storageOK ? '' : `<div class="banner">This browser is not keeping changes between visits. Use Timetables → Backup to save a copy of today's plan.</div>`);
 }
 function render() {
@@ -1097,9 +1196,12 @@ function render() {
   const m = document.getElementById('main');
   const fn = { plan: renderPlan, sheet: renderSheet, tracker: renderWeek, timetables: renderTimetables, staff: renderStaff }[UI.tab] || renderPlan;
   if (!M.version && UI.tab !== 'timetables') {
-    m.innerHTML = srcLine() + `<section class="panel stack"><h2>Load the master timetable to start</h2>
-      <p class="note">The planner doesn't include any staff timetables. Upload the whole-school master timetable (.xlsx) on the Timetables tab. If you share a data file with colleagues, set that up first and they get the master too.</p>
-      <div class="row"><button class="btn primary" data-act="tab" data-tab="timetables">Go to Timetables</button></div></section>`;
+    m.innerHTML = srcLine() + (FOLDER.loading ? `<section class="panel"><p class="note">Reading the timetables in ${esc(FOLDER.name)}…</p></section>`
+      : FOLDER.needsPermission ? `<section class="panel stack"><h2>Reconnect to the timetables folder</h2><p class="note">The planner reads the master timetable from <b>${esc(FOLDER.name)}</b> and needs your permission to open it again.</p><div class="row"><button class="btn primary" data-act="reconnectAll">Reconnect</button></div></section>`
+      : FOLDER.ready ? `<section class="panel stack"><h2>Choose the master timetable</h2><p class="note">No spreadsheet in <b>${esc(FOLDER.name)}</b> has "master" in its name. Choose which one is the master on the Timetables tab.</p><div class="row"><button class="btn primary" data-act="tab" data-tab="timetables">Go to Timetables</button></div></section>`
+      : `<section class="panel stack"><h2>Link the timetables folder to start</h2>
+      <p class="note">The planner doesn't include any staff timetables. ${FOLDER.supported ? 'Link the shared OneDrive folder that holds the master and department timetables, and the planner reads them straight from there, picking up changes as they are saved.' : 'Open the planner from the shared OneDrive folder in Microsoft Edge or Google Chrome to read the timetables from there, or upload the master on the Timetables tab.'}</p>
+      <div class="row">${FOLDER.supported ? '<button class="btn primary" data-act="linkFolder">Link the timetables folder</button>' : ''}<button class="btn" data-act="tab" data-tab="timetables">Go to Timetables</button></div></section>`);
     return;
   }
   m.innerHTML = srcLine() + fn();
@@ -1419,18 +1521,19 @@ function fillWeek() {
 function renderTimetables() {
   const masters = S.versions.filter(v => v.kind === 'master'), depts = deptVersions();
   const verRow = (v, builtin) => {
-    const active = activeVersion() === v;
+    const active = activeVersion() === v && !FV.master;
     return `<div class="ver"><div class="grow"><b>${esc(v.name)}</b> ${active ? '<span class="tag on">In use</span>' : ''}<div class="meta">${builtin ? 'Built into the planner' : 'Uploaded ' + esc(new Date(v.added).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))} · ${v.parsed[0].rows.length} staff rows</div></div>
-      ${active ? '' : `<button class="btn small" data-act="useMaster" data-id="${builtin ? 'builtin' : v.id}">Use this version</button>`}
+      ${active || FV.master ? '' : `<button class="btn small" data-act="useMaster" data-id="${builtin ? 'builtin' : v.id}">Use this version</button>`}
       ${builtin ? '' : `<button class="btn small danger" data-act="rmVer" data-id="${v.id}">Clear</button>`}</div>`;
   };
-  return `<div class="grid2">
-    <section class="panel"><h2>Master timetable</h2><p class="note">The planner always works from the master. Upload a newer master when the timetable changes; with a shared data file, colleagues get it too. Older versions stay here until you clear them.</p>
+  return `<div class="sec panel" style="margin-bottom:20px"><h2>Shared timetables folder</h2>${folderPanel()}</div>
+  <div class="grid2">
+    <section class="panel"><h2>Master timetable</h2>${FV.master ? `<p class="note">Working from <b>${esc(FV.master.name)}</b> in the timetables folder, re-read whenever it is saved. Choose a different spreadsheet as the master above.</p>` : `<p class="note">The planner always works from the master. ${FOLDER.supported ? 'Link the timetables folder above to read it straight from OneDrive, or upload' : 'Upload'} a newer master when the timetable changes; with a shared data file, colleagues get it too. Older versions stay here until you clear them.</p>
       ${BUILTIN ? verRow(BUILTIN, true) : ''}${masters.map(v => verRow(v)).join('')}${BUILTIN || masters.length ? '' : '<p class="meta">None loaded yet.</p>'}
-      <div class="row" style="margin-top:12px"><label class="btn primary" for="upMaster">Upload master (.xlsx)</label><input type="file" id="upMaster" accept=".xlsx,.xlsm,.xls" hidden></div></section>
-    <section class="panel"><h2>Department timetables</h2><p class="note">Upload the timetables departments send you. Each one is only checked against the master for its own department or faculty, worked out from the file name (e.g. "Science TT.xlsx", "Maths timetable.xlsx"). Change it with the dropdown if needed. Where it disagrees with the master, the planner puts ⚠ on that teacher and period. The master is still used for cover.</p>
-      ${depts.length ? depts.map(v => `<div class="ver"><div class="grow"><b>${esc(v.name)}</b> ${v.scope ? `<span class="tag on">Checks ${esc(scopeLabel(v))}</span>` : '<span class="tag warn">Department not set</span>'}<div class="row" style="margin-top:6px">${scopeSelect(v)}</div><div class="meta">${v.builtin ? 'Built into the planner' : 'Uploaded ' + esc(new Date(v.added).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))} · sheet "${esc(v.parsed[0].sheet || '')}" · ${v.parsed.reduce((n, x) => n + x.rows.length, 0)} staff rows · ${(n => n + ' difference' + (n === 1 ? '' : 's'))(M.discList.filter(d => d.version === v.name).length)}</div></div>${v.builtin ? '' : `<button class="btn small danger" data-act="rmVer" data-id="${v.id}">Clear</button>`}</div>`).join('') : '<p class="meta">None loaded.</p>'}
-      <div class="row" style="margin-top:12px"><label class="btn primary" for="upDept">Upload department timetable(s)</label><input type="file" id="upDept" accept=".xlsx,.xlsm,.xls" multiple hidden>${depts.some(v => !v.builtin) ? '<button class="btn small danger" data-act="rmAllDept">Clear all</button>' : ''}</div></section>
+      <div class="row" style="margin-top:12px"><label class="btn primary" for="upMaster">Upload master (.xlsx)</label><input type="file" id="upMaster" accept=".xlsx,.xlsm,.xls" hidden></div>`}</section>
+    <section class="panel"><h2>Department timetables</h2><p class="note">${FOLDER.ready ? 'Spreadsheets in the timetables folder are checked automatically; you can also upload others here.' : 'Upload the timetables departments send you.'} Each one is only checked against the master for its own department or faculty, worked out from the file name (e.g. "Science TT.xlsx", "Maths timetable.xlsx"). Change it with the dropdown if needed. Where it disagrees with the master, the planner puts ⚠ on that teacher and period. The master is still used for cover.</p>
+      ${depts.length ? depts.map(v => `<div class="ver"><div class="grow"><b>${esc(v.name)}</b> ${v.scope ? `<span class="tag on">Checks ${esc(scopeLabel(v))}</span>` : '<span class="tag warn">Department not set</span>'}<div class="row" style="margin-top:6px">${scopeSelect(v)}</div><div class="meta">${v.builtin ? 'Built into the planner' : v.folder ? 'From the timetables folder, saved ' + esc(new Date(v.added).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })) : 'Uploaded ' + esc(new Date(v.added).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))} · sheet "${esc(v.parsed[0].sheet || '')}" · ${v.parsed.reduce((n, x) => n + x.rows.length, 0)} staff rows · ${(n => n + ' difference' + (n === 1 ? '' : 's'))(M.discList.filter(d => d.version === v.name).length)}</div></div>${v.builtin || v.folder ? '' : `<button class="btn small danger" data-act="rmVer" data-id="${v.id}">Clear</button>`}</div>`).join('') : '<p class="meta">None loaded.</p>'}
+      <div class="row" style="margin-top:12px"><label class="btn primary" for="upDept">Upload department timetable(s)</label><input type="file" id="upDept" accept=".xlsx,.xlsm,.xls" multiple hidden>${depts.some(v => !v.builtin && !v.folder) ? '<button class="btn small danger" data-act="rmAllDept">Clear all</button>' : ''}</div></section>
   </div>
   <div class="sec"><div class="toolbar"><h2 class="grow" style="font-size:1.35rem">Possible discrepancies</h2><input type="search" id="discQ" placeholder="Filter by teacher or version" value="${esc(UI.discQ)}" aria-label="Filter discrepancies"></div>
     <div class="tablewrap"><table class="cards" style="--cols:2"><thead><tr><th>Teacher</th><th>When</th><th>Master says</th><th>Department timetable says</th><th>Source</th></tr></thead><tbody id="discBody"></tbody></table></div>
@@ -1639,6 +1742,10 @@ document.addEventListener('click', e => {
     case 'createFile': chooseDataFile(true); break;
     case 'openFile': chooseDataFile(false); break;
     case 'reconnectFile': reconnectFile(); break;
+    case 'reconnectAll': reconnectAll(); break;
+    case 'linkFolder': chooseFolder(); break;
+    case 'scanNow': refreshFolder(false).then(() => toast('Timetables checked.')); break;
+    case 'unlinkFolder': if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm: stop reading the folder'; return; } unlinkFolder(); break;
     case 'unlinkFile': if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm: stop using the file'; return; } unlinkFile(); break;
     case 'pasteBackup': document.getElementById('pasteArea').hidden = false; document.getElementById('pasteBox').focus(); break;
     case 'doPaste': restore(document.getElementById('pasteBox').value); break;
@@ -1654,13 +1761,14 @@ document.addEventListener('change', e => {
   else if (t.id === 'roomSel') { const pl = plan(UI.date, true), k = t.dataset.pid + '|' + t.dataset.slot; pl.alloc[k] = Object.assign({ cover: null, supply: '', note: '' }, pl.alloc[k], { room: t.value }); save(); render(); }
   else if (t.id === 'noteIn') { const pl = plan(UI.date, true), k = t.dataset.pid + '|' + t.dataset.slot; pl.alloc[k] = Object.assign({ cover: null, supply: '', room: '' }, pl.alloc[k], { note: t.value }); save(); toast('Note saved.'); }
   else if (t.id === 'upMaster' && t.files[0]) uploadMaster(t.files[0]);
+  else if (t.id === 'folderMasterSel') { if (t.value) S.settings.folderMaster = t.value; else delete S.settings.folderMaster; UI.sel = null; save(); buildModel(); render(); }
   else if (t.id === 'upDept' && t.files.length) uploadDept([...t.files]);
   else if (t.id === 'upBackup' && t.files[0]) t.files[0].text().then(restore);
   else if (t.id === 'trFrom' || t.id === 'trTo') { if (t.value) { UI[t.id] = t.value; render(); } }
   else if (t.id === 'weekOnly') { UI.weekOnly = t.checked; fillWeek(); }
   else if (t.classList.contains('facIn')) { const v = t.value.trim(); if (v && v !== DEFAULT_FAC[t.dataset.dept]) S.settings.faculty[t.dataset.dept] = v; else delete S.settings.faculty[t.dataset.dept]; save(); toast(t.dataset.dept + ' is in ' + fac(t.dataset.dept) + '.'); }
   else if (t.classList.contains('availIn')) { const p = M.byId[t.dataset.pid]; if (t.checked === defaultCoverable(p)) delete S.settings.avail[p.id]; else S.settings.avail[p.id] = t.checked; save(); }
-  else if (t.classList.contains('scopeIn')) { const v = deptVersions().find(x => x.id === t.dataset.id); if (v) { if (v.builtin) { S.settings.scope = S.settings.scope || {}; S.settings.scope[v.id] = t.value; } v.scope = t.value; save(); buildModel(); render(); toast(v.scope ? v.name + ' now checks ' + scopeLabel(v) + '.' : v.name + ' is not being checked.'); } }
+  else if (t.classList.contains('scopeIn')) { const v = deptVersions().find(x => x.id === t.dataset.id); if (v) { if (v.builtin || v.folder) { S.settings.scope = S.settings.scope || {}; S.settings.scope[v.id] = t.value; } v.scope = t.value; save(); buildModel(); render(); toast(v.scope ? v.name + ' now checks ' + scopeLabel(v) + '.' : v.name + ' is not being checked.'); } }
   else if (t.classList.contains('promIn')) { const p = M.byId[t.dataset.pid]; S.settings.promoted = S.settings.promoted || {}; if (t.checked === defaultPromoted(p)) delete S.settings.promoted[p.id]; else S.settings.promoted[p.id] = t.checked; save(); }
   else if (t.classList.contains('allowIn')) { if (t.value === '') delete S.settings.allowance[t.dataset.pid]; else S.settings.allowance[t.dataset.pid] = Number(t.value); save(); }
 });
@@ -1685,6 +1793,6 @@ window.addEventListener('hashchange', route);
 UI.date = toSchoolDay(iso(new Date()));
 buildModel();
 route();
-restoreFileLink();
+restoreFileLink().then(restoreFolderLink);
 
 </script>
