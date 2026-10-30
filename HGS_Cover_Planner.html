@@ -1,4 +1,4 @@
-<!-- HGS Cover Planner — last updated 2026-10-29 -->
+<!-- HGS Cover Planner — last updated 2026-10-30 · reliability update 2 -->
 <title>HGS Cover Planner</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="claude:viewport-fit-sides" content="cover">
@@ -779,13 +779,13 @@ function save() {
 }
 
 /* ---------- shared data file (e.g. in a OneDrive folder): the same plans for everyone who opens it; this browser's copy is the fallback ----------
-   Each save re-reads the file and merges entry by entry, so two people saving close together keep each other's changes. */
+   One named editor writes; viewers reload. Same-item conflicts stop saving and preserve local work. */
 const FILE = { supported: typeof window.showOpenFilePicker === 'function' && !IN_FRAME, handle: null, name: '', ready: false, needsPermission: false, base: null, lastMod: 0, busy: false, again: false, timer: 0 };
 const LS_FILE = LS + '.file';
 const stable = o => JSON.stringify(o, (k, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : v);
 const clone = o => JSON.parse(JSON.stringify(o));
 function hash(s) { let a = 0x811c9dc5, b = 0x9e3779b9; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); a = Math.imul(a ^ c, 16777619); b = Math.imul(b ^ c, 2246822507); } return (a >>> 0).toString(36) + '.' + (b >>> 0).toString(36); }
-// One entry per absence, cover allocation, setting and uploaded timetable, so people changing different things never overwrite each other
+// One entry per absence, cover allocation, setting and uploaded timetable, for conflict detection when the shared file changes
 const K = (...parts) => JSON.stringify(parts);
 function toDocs(src) {
   const out = { [K('activeMaster')]: src.activeMaster || 'builtin' };
@@ -827,42 +827,73 @@ function storeBase() { try { localStorage.setItem(LS_FILE, JSON.stringify({ name
 function loadBase() { try { const o = JSON.parse(localStorage.getItem(LS_FILE) || 'null'); FILE.base = o && o.name === FILE.name ? o.base : null; } catch (e) { FILE.base = null; } }
 async function readDataFile() {
   const f = await FILE.handle.getFile(), txt = (await f.text()).trim();
-  if (!txt) return {};
-  let o; try { o = JSON.parse(txt); } catch (e) { throw new Error(FILE.name + ' is not a Cover Planner data file'); }
-  if (!o || o.app !== 'hgs-cover') throw new Error(FILE.name + ' is not a Cover Planner data file');
-  return o.docs || (o.data ? toDocs(o.data) : {});   // a backup file can be used as a data file too
+  const o = txt ? JSON.parse(txt) : { app: 'hgs-cover', docs: {} };
+  if (!o || o.app !== 'hgs-cover') throw new Error('Not a Cover Planner data file');
+  FILE.remoteEditor = o.editor || null;
+  return o.docs || (o.data ? toDocs(o.data) : {});
 }
+
 // Three-way merge per document against what this browser last synced (FILE.base, as hashes):
-// changed here since then -> ours, otherwise -> the file's. When first linking, the file wins and anything only kept here is added.
+// Only the named editor writes. Conflicting changes stop the save; first linking loads the shared plan.
 async function syncFile(first) {
-  if (FILE.busy) { FILE.again = true; return true; }
+  if (FILE.busy) { FILE.again = true; return false; }
   FILE.busy = true;
   try {
     do {
       FILE.again = false;
       const remote = await readDataFile(), local = toDocs(S), base = FILE.base || {};
-      const merged = {};
-      for (const p of new Set([...Object.keys(remote), ...Object.keys(local), ...Object.keys(base)])) {
-        const lh = p in local ? hash(stable(local[p])) : null;
-        const ours = first ? !(p in remote) : lh !== (base[p] || null);
-        const v = ours ? local[p] : remote[p];
-        if (v !== undefined) merged[p] = v;
+      if (EDIT.mode === 'edit' && FILE.remoteEditor?.id !== EDIT.id) {
+        EDIT.mode = 'view'; EDIT.blocked = true;
+        STATUS.error = 'Editing has changed hands. Your unsaved work is kept here: download a backup before reloading the shared plan.';
+        rememberRecovery(S, 'Work retained after editor handover', true);
+        return false;
       }
-      const m = stable(merged);
-      if (m !== stable(remote)) { const w = await FILE.handle.createWritable(); await w.write(JSON.stringify({ app: 'hgs-cover', format: 1, saved: new Date().toISOString(), docs: merged })); await w.close(); }
+      if (EDIT.blocked) return false;
+      if (EDIT.mode !== 'edit') {
+        fromDocs(clone(remote)); acceptState();
+      } else {
+        const merged = {};
+        for (const key of new Set([...Object.keys(remote), ...Object.keys(local), ...Object.keys(base)])) {
+          const lh = key in local ? hash(stable(local[key])) : null;
+          const rh = key in remote ? hash(stable(remote[key])) : null;
+          const ours = lh !== (base[key] || null), theirs = rh !== (base[key] || null);
+          if (!first && ours && theirs && lh !== rh) throw new Error('The same item changed in another copy. Download your backup, then reload the shared plan.');
+          const value = first ? remote[key] : ours ? local[key] : remote[key];
+          if (value !== undefined) merged[key] = value;
+        }
+        if (stable(merged) !== stable(remote)) {
+          STATUS.pending = true; updateSafetyBar();
+          const w = await FILE.handle.createWritable();
+          await w.write(JSON.stringify({ app: 'hgs-cover', format: 2, saved: new Date().toISOString(), editor: FILE.remoteEditor, docs: merged })); await w.close();
+        }
+        const verified = await readDataFile();
+        if (FILE.remoteEditor?.id !== EDIT.id || stable(verified) !== stable(merged)) throw new Error('The shared file changed while saving. Your changes remain on this computer.');
+        const latest = toDocs(S);
+        if (stable(latest) !== stable(local)) {
+          const carry = clone(merged);
+          for (const k of new Set([...Object.keys(local), ...Object.keys(latest)])) {
+            if (stable(local[k]) !== stable(latest[k])) { if (k in latest) carry[k] = latest[k]; else delete carry[k]; }
+          }
+          fromDocs(carry); FILE.again = true;
+        } else fromDocs(clone(merged));
+        acceptState();
+        FILE.base = Object.fromEntries(Object.entries(merged).map(([k,v]) => [k,hash(stable(v))]));
+        STATUS.saved = Date.now(); STATUS.pending = false;
+      }
+      const docs = toDocs(S);
+      if (EDIT.mode !== 'edit') FILE.base = Object.fromEntries(Object.entries(docs).map(([k,v]) => [k,hash(stable(v))])); storeBase();
       FILE.lastMod = (await FILE.handle.getFile()).lastModified;
-      FILE.base = Object.fromEntries(Object.entries(merged).map(([p, v]) => [p, hash(stable(v))])); storeBase();
-      first = false;
-      if (m !== stable(local)) { fromDocs(clone(merged)); try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { } buildModel(); render(); }
+      STATUS.error = ''; buildModel(); render(); first = false;
     } while (FILE.again);
+    return true;
   } catch (e) {
-    if (e && e.name === 'NotAllowedError') { FILE.ready = false; FILE.needsPermission = true; render(); }
-    else toast('Could not use ' + FILE.name + ': ' + (e && e.message || e) + '. Changes are kept in this browser.');
+    STATUS.error = 'Saving failed — changes held on this computer. ' + (e.message || e);
+    if (e.name === 'NotAllowedError') { FILE.ready = false; FILE.needsPermission = true; }
     return false;
-  } finally { FILE.busy = false; }
-  return true;
+  } finally { FILE.busy = false; updateSafetyBar(); }
 }
-function fileSoon() { clearTimeout(FILE.timer); FILE.timer = setTimeout(() => syncFile(false), 400); }
+
+function fileSoon() { if (EDIT.mode !== 'edit') return; STATUS.pending = true; updateSafetyBar(); clearTimeout(FILE.timer); FILE.timer = setTimeout(() => syncFile(false), 400); }
 // Pick up a colleague's changes: check the file every 10 s and when the window comes back into focus
 async function checkFile() {
   if (!FILE.ready || FILE.busy || document.hidden) return;
@@ -871,9 +902,11 @@ async function checkFile() {
 setInterval(checkFile, 10000);
 window.addEventListener('focus', checkFile);
 async function linkFile(handle) {
+  if (Object.keys(S.plans).length || S.versions.length) rememberRecovery(S, 'Before opening shared plan', true);
+  EDIT.mode = 'view'; EDIT.blocked = false;
   Object.assign(FILE, { handle, name: handle.name, base: null, ready: true, needsPermission: false });
   try { await idb('readwrite', s => s.put(handle, 'dataFile')); } catch (e) { }
-  if (await syncFile(true)) { render(); toast('Saving to ' + FILE.name + '.'); }
+  if (await syncFile(true)) { render(); toast('Shared plan opened in viewing mode. Choose Take editing to make changes.'); }
   else if (FILE.ready) unlinkFile(true);
 }
 async function chooseDataFile(create) {
@@ -1154,6 +1187,7 @@ const PADLOCK = '<svg class="padlock" viewBox="0 0 24 24" aria-hidden="true" fil
 const clsText = list => list ? list.map(e => e.t.replace(/\n/g, ' ')).join(' / ') : '';
 function lockOf(pid, slot, date) {
   const l = (S.settings.locks || {})[pid + '|' + slot]; if (!l) return null;
+  if (l.since && date && date < l.since) return null;
   if (l.until && date && date > l.until) return null;
   return Object.assign({}, l, { stale: !!l.cls && clsText(entryOf(M.byId[pid], slot)) !== l.cls });
 }
@@ -1260,7 +1294,7 @@ function renderShell() {
   document.getElementById('dateIn').value = UI.date;
   const pl = plan(UI.date);
   let need = 0;
-  if (di >= 0) for (const pid of Object.keys(absentees(UI.date))) { const p = M.byId[pid]; if (!p) continue; for (const s of M.dayPeriods[di] || []) if (wantsCover(UI.date, pid, s)) { const a = pl.alloc[pid + '|' + s]; if (!a || (!a.cover && !a.supply)) need++; } }
+  if (di >= 0) for (const pid of Object.keys(absentees(UI.date))) { const p = M.byId[pid]; if (!p) continue; for (const s of M.dayPeriods[di] || []) if (wantsCover(UI.date, pid, s)) { const a = pl.alloc[pid + '|' + s]; if (!allocationOK(UI.date, pid + '|' + s, a)) need++; } }
   document.getElementById('tabs').innerHTML = TABS.map(([id, label]) => {
     let extra = '';
     if (id === 'plan' && need) extra = `<span class="count" title="Classes still to cover">${need}</span>`;
@@ -1273,7 +1307,7 @@ function srcLine() {
   return `<div class="srcline noprint"><span>${M.version ? 'Working from <b>' + esc(M.version.name) + '</b>' : 'No master timetable loaded'}</span>
     <span>${depts ? depts + ' department timetable' + (depts > 1 ? 's' : '') + ' checked' : 'No department timetables loaded'}</span>
     ${M.discList.length ? `<button type="button" class="linkbtn" data-act="tab" data-tab="timetables">⚠ ${M.discList.length} possible discrepanc${M.discList.length > 1 ? 'ies' : 'y'}</button>` : ''}
-    <span>${FILE.ready ? 'Saving to <b>' + esc(FILE.name) + '</b>' : 'Saved in this browser only'}${FOLDER.supported && !FOLDER.handle && !FILE.handle ? ' · <button type="button" class="linkbtn" data-act="tab" data-tab="timetables">Link the shared folder</button>' : ''}</span></div>`
+    <span>${esc(saveStatusText())}${FOLDER.supported && !FOLDER.handle && !FILE.handle ? ' · <button type="button" class="linkbtn" data-act="tab" data-tab="timetables">Link the shared folder</button>' : ''}</span></div>`
     + (FOLDER.needsPermission || FILE.needsPermission ? `<div class="banner noprint">The planner needs your permission to use <b>${esc(FOLDER.needsPermission ? FOLDER.name : FILE.name)}</b> again. <button class="btn small primary" data-act="reconnectAll">Reconnect</button></div>` : '')
     + (FILE.ready || storageOK ? '' : `<div class="banner">This browser is not keeping changes between visits. Use Timetables → Backup to save a copy of today's plan.</div>`);
 }
@@ -1315,7 +1349,7 @@ function renderPlan() {
   const ds = M.dayPeriods[di];
   const absNow = absentees(date), absentIds = Object.keys(absNow).filter(id => M.byId[id]);
   let total = 0, done = 0;
-  absentIds.forEach(pid => ds.forEach(s => { if (wantsCover(date, pid, s)) { total++; const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) done++; } }));
+  absentIds.forEach(pid => ds.forEach(s => { if (wantsCover(date, pid, s)) { total++; const a = pl.alloc[pid + '|' + s]; if (allocationOK(date, pid + '|' + s, a)) done++; } }));
   // previous school day absences to bring forward
   const prev = stepSchoolDay(date, -1), prevPl = S.plans[prev];
   const carry = prevPl ? Object.keys(prevPl.absent).filter(id => !absNow[id] && M.byId[id]) : [];
@@ -1347,7 +1381,7 @@ function renderPlan() {
   } else {
     mainCol = `<section><div class="autobar"><span class="lbl">Fill all classes still needing cover</span>
       <div class="row"><button class="btn" data-act="auto" data-mode="int">Suggested internal</button><button class="btn" data-act="auto" data-mode="ext">Suggested external</button><button class="btn primary" data-act="auto" data-mode="mix">Internal, then external</button><button class="btn danger" data-act="clearDay">Clear today's cover</button></div>
-      <span class="meta">Only staff with cover left this week are used. Anything you have already allocated is kept.</span></div>` + absentIds.map(pid => teacherCard(pid, ds)).join('') + '</section>';
+      <span class="meta">Only staff with cover left this week and no timetable discrepancies are used. Valid existing allocations are kept; invalid cover is reconsidered.</span></div>` + absentIds.map(pid => teacherCard(pid, ds)).join('') + '</section>';
   }
   return `<div class="layout">${aside}${mainCol}</div>`;
 }
@@ -1367,9 +1401,9 @@ function teacherCard(pid, ds) {
     const lk = lockOf(pid, s, date);
     if (lk && !lk.stale) return `<button class="tile locked${sel}" data-act="sel" data-pid="${pid}" data-slot="${s}" title="Locked every week${lk.note ? ': ' + esc(lk.note) : ''}">${tri}<span class="p">${slotLabel(s)} · <span class="mono">${esc(list[0].room || '')}</span></span>
       <span class="c">${esc(cls.map(x => x.cls).join(' / '))}</span><span class="s">${esc(cls.map(x => x.subj).join(' / '))}</span><span class="st">Locked${lk.note ? ': ' + esc(lk.note) : ''}</span><span class="bigl">${PADLOCK}</span></button>`;
-    const status = a && (a.cover || a.supply) ? `<span class="st">✓ ${esc(a.cover ? M.byId[a.cover]?.name : a.supply)}${a.room ? ' · ' + esc(a.room) : ''}</span>${a.cover && fullDayOn(date, a.cover, M.slots[s].day) ? '<span class="fulltag">Full day</span>' : ''}`
+    const status = a && (a.cover || a.supply) && !allocationOK(date, pid + '|' + s, a) ? `<span class="st">⚠ Reassign: ${esc(allocationProblems(date, pid + '|' + s, a).join('; '))}</span>` : allocationOK(date, pid + '|' + s, a) ? `<span class="st">✓ ${esc(a.cover ? M.byId[a.cover]?.name : a.supply)}${a.room ? ' · ' + esc(a.room) : ''}</span>${a.cover && fullDayOn(date, a.cover, M.slots[s].day) ? '<span class="fulltag">Full day</span>' : ''}`
       : nc ? '<span class="st muted">No cover needed</span>' : '<span class="st">Needs cover</span>';
-    const kind = a && (a.cover || a.supply) ? 'done' : nc ? '' : 'need';
+    const kind = allocationOK(date, pid + '|' + s, a) ? 'done' : nc ? '' : 'need';
     return `<button class="tile ${kind}${sel}" data-act="sel" data-pid="${pid}" data-slot="${s}">${tri}<span class="p">${slotLabel(s)} · <span class="mono">${esc(list[0].room || '')}</span></span>
       <span class="c">${esc(cls.map(x => x.cls).join(' / '))}</span><span class="s">${esc(cls.map(x => x.subj).join(' / '))}</span>${status}</button>`;
   }).join('');
@@ -1521,18 +1555,18 @@ function autoFill(mode) {
   const pl = plan(date, true), jobs = [];
   for (const s of M.dayPeriods[di]) for (const pid of Object.keys(absentees(date))) {
     const p = M.byId[pid]; if (!p || !wantsCover(date, pid, s)) continue;
-    const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) continue;
+    const a = pl.alloc[pid + '|' + s]; if (allocationOK(date, pid + '|' + s, a)) continue;
     jobs.push([pid, s]);
   }
   let filled = 0, left = 0, fromExt = 0;
   for (const [pid, s] of jobs) {
-    const avail = candidates(date, pid, s).res.filter(c => c.remaining > 0);
+    const avail = candidates(date, pid, s).res.filter(c => c.remaining > 0 && !c.disc);
     const int = avail.find(c => c.rel !== 'ext'), ext = avail.find(c => c.rel === 'ext');
     const pick = mode === 'int' ? int : mode === 'ext' ? ext : (int || ext);
     if (!pick) { left++; continue; }
     if (mode === 'mix' && !int) fromExt++;
     const k = pid + '|' + s, cur = pl.alloc[k] || {};
-    pl.alloc[k] = { cover: pick.p.id, supply: '', room: cur.room || '', note: cur.note || '' }; filled++;
+    pl.alloc[k] = { cover: pick.p.id, supply: '', room: cur.room || '', note: cur.note || '', assignedClass: clsText(entryOf(M.byId[pid],s)) }; filled++;
   }
   save(); render();
   toast(jobs.length ? `${filled} class${filled === 1 ? '' : 'es'} covered${mode === 'mix' && fromExt ? ' (' + fromExt + ' from outside the faculty)' : ''}${left ? ', ' + left + ' still need cover' : ''}.` : 'Every class already has cover.');
@@ -1548,8 +1582,8 @@ function sheetRows(date) {
     const cls = list.map(e => TT.splitClass(e.t));
     if (isLocked(pid, s, date)) continue;   // standing arrangement: left off the cover sheet and the email
     const a = pl.alloc[pid + '|' + s];
-    if (!needsCover(list) && !(a && (a.cover || a.supply))) continue;
-    rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: a ? (a.cover ? M.byId[a.cover]?.name : a.supply) || '' : '', coverRoom: a && a.room ? a.room : (list[0].room || ''), moved: !!(a && a.room && a.room !== list[0].room), note: a ? a.note || '' : '' });
+    if (!needsCover(list) && !(allocationOK(date, pid + '|' + s, a))) continue;
+    rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: a && !allocationOK(date, pid + '|' + s, a) && (a.cover || a.supply) ? 'REASSIGN — ' + allocationProblems(date, pid + '|' + s, a).join('; ') : a ? (a.cover ? M.byId[a.cover]?.name : a.supply) || '' : '', coverRoom: a && a.room ? a.room : (list[0].room || ''), moved: !!(a && a.room && a.room !== list[0].room), note: a ? a.note || '' : '' });
   }
   return rows;
 }
@@ -1822,9 +1856,21 @@ function exportData() {
   navigator.clipboard.writeText(txt).then(() => toast('Backup copied. Paste it into a text file or an email to yourself.'), () => showCopyBox(txt));
 }
 function restore(txt) {
-  try { const o = JSON.parse(txt); const d = o.data || o; if (!d.plans || !d.settings) throw 0; S = d; S.versions = S.versions || []; save(); buildModel(); render(); toast('Backup restored.'); }
-  catch (e) { toast('That is not a Cover Planner backup.'); }
+  if (!canEdit()) { toast('Choose Take editing before restoring a backup.'); return; }
+  let d;
+  try {
+    const o = JSON.parse(txt);
+    if (o.app === 'hgs-cover' && o.docs) {
+      const old = clone(S); try { fromDocs(o.docs); d = clone(S); } finally { S = old; }
+    } else d = o.data || o;
+    validateBackup(d);
+  } catch (e) { toast('Backup not restored: ' + (e.message || 'invalid file')); return; }
+  if (!confirm('Replace the current plan with this backup? A recovery copy will be kept first.')) return;
+  rememberRecovery(S, 'Before restoring backup', true);
+  ACTION = 'Restore backup'; S = clone(d); S.versions ||= []; S.settings = Object.assign({faculty:{},avail:{},allowance:{}},S.settings);
+  save(); buildModel(); render(); toast('Backup restored. Undo is available.');
 }
+
 
 /* ---------- events ---------- */
 function setDate(d) { UI.date = toSchoolDay(d); UI.sel = null; render(); }
@@ -2030,6 +2076,234 @@ function goTab(id) {
 }
 function route() { let h = location.hash.replace('#', ''); if (h === 'week') h = 'tracker'; UI.tab = TABS.some(t => t[0] === h) ? h : 'plan'; render(); }
 window.addEventListener('hashchange', route);
+
+/* ---------- reliability, handover and recovery ---------- */
+const EDIT = { id: (globalThis.crypto?.randomUUID?.() || String(Date.now()) + Math.random()), mode: 'view', blocked: false, busy: false };
+const STATUS = { saved: 0, pending: false, error: '', recoveryError: '' };
+let ACTION = 'Edit plan', LAST_STATE = clone(S), undoStack = [], recoveryCopies = [];
+try { recoveryCopies = JSON.parse(localStorage.getItem(LS + '.recovery') || '[]'); if (!Array.isArray(recoveryCopies)) recoveryCopies = []; } catch (_) {}
+function canEdit() { return EDIT.mode === 'edit' && !EDIT.blocked && !EDIT.busy; }
+function acceptState() { LAST_STATE = clone(S); try { localStorage.setItem(LS, JSON.stringify(S)); storageOK = true; } catch (_) { storageOK = false; } }
+function saveStatusText() {
+  if (STATUS.error) return STATUS.error;
+  if (!storageOK && !FILE.ready) return 'Saving failed — changes only held in memory. Download a backup now.';
+  if (STATUS.pending) return 'Changes waiting to save';
+  if (FILE.ready) return STATUS.saved ? 'Saved to shared file at ' + new Date(STATUS.saved).toLocaleTimeString('en-GB') : 'Shared file connected · viewing latest loaded plan';
+  return FILE.handle ? 'Shared file disconnected — changes held on this computer' : 'Saved on this computer only';
+}
+function rememberRecovery(data, label, shared) {
+  const item = { id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,7), at: new Date().toISOString(), label, data: clone(data) };
+  recoveryCopies.unshift(item); recoveryCopies = recoveryCopies.slice(0,12);
+  try { persistRecoveries(); STATUS.recoveryError = ''; }
+  catch (_) { STATUS.recoveryError = 'Recovery copies could not be saved in this browser. Download a backup; Undo still works while this page stays open.'; }
+  if (shared && FOLDER.ready && EDIT.mode === 'edit') {
+    recoveryWrite = recoveryWrite.then(async () => {
+      const dir = await FOLDER.handle.getDirectoryHandle('Cover Planner Recovery', {create:true});
+      const handle = await dir.getFileHandle('HGS-recovery-' + item.at.replace(/[:.]/g,'-') + '-' + item.id + '.json', {create:true});
+      const w = await handle.createWritable(); await w.write(JSON.stringify({app:'hgs-cover', saved:item.at, label, data:item.data})); await w.close();
+    }).catch(e => { STATUS.recoveryError = 'Shared recovery copy failed: ' + e.message + '. A browser recovery copy is available if storage succeeded.'; updateSafetyBar(); });
+  }
+  return item;
+}
+function persistRecoveries() {
+  let keep = recoveryCopies.slice();
+  while (keep.length) {
+    try { localStorage.setItem(LS + '.recovery', JSON.stringify(keep)); return; }
+    catch(e) { if(keep.length===1) throw e; keep.pop(); }
+  }
+}
+let recoveryWrite = Promise.resolve();
+const saveOriginal = save;
+save = function() {
+  if (!canEdit()) { S = clone(LAST_STATE); toast('Viewing mode — choose Take editing first.'); return; }
+  if (stable(S) !== stable(LAST_STATE)) {
+    undoStack.push({ label: ACTION, data: clone(LAST_STATE) }); undoStack = undoStack.slice(-20);
+    const bulk = /auto|clear|restore|master|phSave|rmVer|rmAllDept|resetStaff|lock|rmAbs|upload/i.test(ACTION);
+    rememberRecovery(LAST_STATE, 'Before ' + ACTION, bulk);
+  }
+  saveOriginal();
+  if (!storageOK) {
+    // Prioritise the current plan over older browser recovery copies.
+    try { localStorage.removeItem(LS + '.recovery'); localStorage.setItem(LS, JSON.stringify(S)); storageOK = true; persistRecoveries(); }
+    catch (_) { STATUS.recoveryError = 'Browser storage is full. Download a backup; recovery and Undo remain available while this page stays open.'; }
+  }
+  LAST_STATE = clone(S); updateSafetyBar();
+};
+function allocationProblems(date, key, a) {
+  if (!a || (!a.cover && !a.supply)) return [];
+  const [pid, rawSlot] = key.split('|'), slot = Number(rawSlot), issues = [], p = M.byId[a.cover];
+  if (!M.byId[pid] || !M.slots[slot]) return ['class or teacher no longer in timetable'];
+  if (!wantsCover(date,pid,slot)) issues.push('class no longer needs cover');
+  if (a.assignedClass && a.assignedClass !== clsText(entryOf(M.byId[pid],slot))) issues.push('class has changed since cover was allocated');
+  if (a.cover) {
+    if (!p) issues.push('cover teacher no longer in timetable');
+    else {
+      if (absentAt(date,p.id,slot)) issues.push(p.name + ' is absent');
+      if (phasedOn(date,p.id)) issues.push(p.name + ' is on a phased return');
+      if (p.offDays.includes(M.slots[slot].day) || p.cells[slot]?.out) issues.push(p.name + ' is not in school');
+      else if (p.cells[slot]) issues.push(p.name + ' is timetabled elsewhere');
+      if (!coverable(p)) issues.push(p.name + ' is unavailable for cover');
+      if (coverSlotsOn(date,p.id,key).includes(slot)) issues.push(p.name + ' is double-booked');
+    }
+  }
+  if (a.room && !freeRooms(date,slot,key).includes(a.room) && a.room !== entryOf(M.byId[pid],slot)?.[0]?.room) issues.push('room ' + a.room + ' is occupied');
+  return issues;
+}
+function allocationOK(date, key, a) { return !!(a && (a.cover || a.supply) && !allocationProblems(date,key,a).length); }
+function allocationWarnings(date, key, a) {
+  if (!a?.cover || !M.byId[a.cover]) return [];
+  const slot = Number(key.split('|')[1]), warnings = [];
+  const disc = M.disc[a.cover+'|'+slot];
+  if (disc?.length && a.discrepancyAck !== stable(disc)) warnings.push('department timetable disagrees — check availability');
+  const used = weekUsage(date)[a.cover]?.total || 0;
+  if (used > allowance(M.byId[a.cover]) && a.allowanceAck !== used) warnings.push('weekly allowance exceeded — override needed');
+  return warnings;
+}
+function checks(date) {
+  return Object.entries(plan(date).alloc).flatMap(([key,a]) => {
+    const hard = allocationProblems(date,key,a), warnings = allocationWarnings(date,key,a);
+    return hard.length || warnings.length ? [{key,hard,warnings}] : [];
+  });
+}
+function safetyMarkup() {
+  const rows = M?.version ? checks(UI.date) : [];
+  return `<div class="panel noprint" style="margin-bottom:14px" id="safetyBar">
+    <div class="row"><b>${canEdit() ? 'Editing' : 'Viewing mode'}</b><span>${FILE.remoteEditor ? 'Main editor: ' + esc(FILE.remoteEditor.name) : 'No shared editor recorded'}</span>
+    <button class="btn small" data-act="${canEdit() ? 'releaseEditing' : 'takeEditing'}">${canEdit() ? 'Finish editing / hand over' : 'Take editing'}</button>
+    <button class="btn small" data-act="undoChange" ${!canEdit() || !undoStack.length ? 'disabled' : ''}>Undo${undoStack.length ? ': ' + esc(undoStack.at(-1).label) : ''}</button>
+    <button class="btn small" data-act="showRecovery">Recovery copies</button>
+    ${STATUS.error || EDIT.blocked ? '<button class="btn small" data-act="exportData">Download my backup</button><button class="btn small" data-act="reloadShared">Reload shared plan</button>' : ''}
+    ${STATUS.error && canEdit() && FILE.ready ? '<button class="btn small" data-act="retrySave">Retry saving</button>' : ''}</div>
+    <div role="status" aria-live="polite" style="margin-top:6px">${esc(saveStatusText())}</div>
+    ${STATUS.recoveryError ? '<p class="warnline">'+esc(STATUS.recoveryError)+'</p>' : ''}
+    ${FILE.handle ? '<p class="meta">One person should edit at a time. For OneDrive folders, finish editing and allow OneDrive to sync before your colleague takes over. All editors must use this updated planner.</p>' : ''}
+    ${rows.length ? '<div class="banner" style="margin-top:10px;margin-bottom:0"><b>Cover needs checking</b><ul>'+rows.map(r=>{
+      const [id,s]=r.key.split('|'); return '<li>'+esc(M.byId[id]?.name || id)+' '+esc(M.slots[+s] ? slotLabel(+s) : s)+': '+esc(r.hard.concat(r.warnings).join('; '))+' <button class="linkbtn" data-act="fixAllocation" data-key="'+esc(r.key)+'">Review</button></li>';
+    }).join('')+'</ul></div>' : ''}
+  </div>`;
+}
+function updateSafetyBar() {
+  const bar = document.getElementById('safetyBar'); if (bar && M && UI.date) bar.outerHTML = safetyMarkup();
+}
+const renderOriginal = render;
+render = function() { renderOriginal(); const main=document.getElementById('main'); main.insertAdjacentHTML('afterbegin',safetyMarkup()); };
+async function takeEditing() {
+  if (EDIT.busy || FILE.busy) { toast('Please wait for the current save to finish.'); return; }
+  if (EDIT.blocked) { toast('Download your backup, then reload the shared plan before taking editing.'); return; }
+  if (FILE.handle && !FILE.ready) { toast('Reconnect the shared file before taking editing.'); return; }
+  const name = prompt('Your name (shown to colleagues while you edit):', localStorage.getItem(LS+'.editorName') || ''); if (!name?.trim()) return;
+  try { localStorage.setItem(LS+'.editorName',name.trim()); } catch (_) {}
+  EDIT.busy = true;
+  try {
+    if (FILE.ready) {
+      clearTimeout(FILE.timer);
+      const remote=await readDataFile(), prior=FILE.remoteEditor;
+      if (prior && !confirm(prior.name+' is recorded as editor. Only take over after they have finished and the shared folder has synced. Take over now?')) return;
+      rememberRecovery(S,'Before editor handover',false);
+      const owner={id:EDIT.id,name:name.trim(),since:new Date().toISOString()};
+      const w=await FILE.handle.createWritable(); await w.write(JSON.stringify({app:'hgs-cover',format:2,saved:new Date().toISOString(),editor:owner,docs:remote})); await w.close();
+      const verified=await readDataFile();
+      if (FILE.remoteEditor?.id!==EDIT.id) throw new Error('Another editor took over. Try again after agreeing a handover.');
+      fromDocs(clone(verified)); acceptState();
+      FILE.base=Object.fromEntries(Object.entries(verified).map(([k,v])=>[k,hash(stable(v))]));storeBase();
+      FILE.lastMod=(await FILE.handle.getFile()).lastModified;
+    }
+    EDIT.mode='edit'; STATUS.error=''; STATUS.pending=false; undoStack=[];
+    toast('Editing enabled.');
+  } catch(e) { STATUS.error='Could not take editing: '+e.message; }
+  finally { EDIT.busy=false; buildModel();render(); }
+}
+async function releaseEditing() {
+  if (FILE.busy || EDIT.busy) { toast('Wait for saving to finish before handing over.'); return; }
+  if (FILE.handle && !FILE.ready) { toast('Reconnect and save before handing over.'); return; }
+  if (FILE.ready) {
+    clearTimeout(FILE.timer); if (!await syncFile(false)) return;
+    await recoveryWrite;
+    EDIT.busy=true;
+    try {
+      const remote=await readDataFile();
+      if(FILE.remoteEditor?.id!==EDIT.id) throw new Error('Editing has already changed hands.');
+      const w=await FILE.handle.createWritable(); await w.write(JSON.stringify({app:'hgs-cover',format:2,saved:new Date().toISOString(),editor:null,docs:remote}));await w.close();FILE.remoteEditor=null;
+    } catch(e) { STATUS.error='Handover failed: '+e.message; EDIT.busy=false;updateSafetyBar();return; }
+    EDIT.busy=false;
+  }
+  EDIT.mode='view'; undoStack=[];render();toast('Editing finished. Allow the shared folder to sync before the next editor starts.');
+}
+function downloadRecovery(item) {
+  const a=document.createElement('a'), url=URL.createObjectURL(new Blob([JSON.stringify({app:'hgs-cover',saved:item.at,data:item.data})],{type:'application/json'}));
+  a.href=url;a.download='HGS-recovery-'+item.at.replace(/[:.]/g,'-')+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function showRecovery() {
+  document.getElementById('recoveryPanel')?.remove();
+  const div=document.createElement('section');div.id='recoveryPanel';div.className='panel noprint';
+  div.innerHTML='<h2>Recovery copies</h2><p>Up to 12 recent changes are kept in this browser when space permits. Before bulk changes, a dated copy is also written to “Cover Planner Recovery” in the linked folder. Keep downloaded backups for longer-term recovery.</p>'+recoveryCopies.map(x=>'<div class="row" style="margin:10px 0"><span>'+esc(new Date(x.at).toLocaleString('en-GB')+' · '+x.label)+'</span><button class="btn small" data-act="downloadRecovery" data-id="'+x.id+'">Download</button><button class="btn small" data-act="restoreRecovery" data-id="'+x.id+'" '+(!canEdit()?'disabled':'')+'>Restore</button></div>').join('')+(recoveryCopies.length?'':'<p>No recovery copies on this computer yet.</p>')+'<button class="btn" data-act="closeRecovery">Close</button>';
+  document.getElementById('main').prepend(div);
+}
+function validateBackup(d) {
+  const obj=x=>x && typeof x==='object' && !Array.isArray(x);
+  if (!obj(d) || !obj(d.plans) || !obj(d.settings) || (d.versions && !Array.isArray(d.versions))) throw new Error('This is not a valid Cover Planner backup.');
+  for (const k of ['faculty','avail','allowance','edits','longAbs','phased','locks']) if(d.settings[k]!=null && !obj(d.settings[k])) throw new Error('Invalid staff settings.');
+  for (const [date,p] of Object.entries(d.plans)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !obj(p) || !obj(p.absent) || !obj(p.alloc)) throw new Error('Invalid daily plan.');
+    for (const a of Object.values(p.absent)) if(!obj(a) || (a.periods!=null && (!Array.isArray(a.periods) || !a.periods.every(Number.isInteger)))) throw new Error('Invalid absence record.');
+    for (const [k,a] of Object.entries(p.alloc)) if(!/^.+\|\d+$/.test(k) || !obj(a) || (a.cover!=null && typeof a.cover!=='string') || (a.supply!=null && typeof a.supply!=='string')) throw new Error('Invalid cover allocation.');
+  }
+  for(const v of d.versions || []) if(!obj(v) || !Array.isArray(v.parsed) || !v.parsed.length || !v.parsed.every(x=>Array.isArray(x.rows)&&Array.isArray(x.slots)&&Array.isArray(x.days))) throw new Error('Invalid timetable in backup.');
+  for(const ph of Object.values(d.settings.phased || {})) if(!obj(ph)||!Array.isArray(ph.weeks)||!ph.weeks.length||!ph.weeks.every(w=>Array.isArray(w)&&w.every(Number.isInteger))) throw new Error('Invalid phased return.');
+}
+function outputAllowed() {
+  const problems=checks(UI.date);
+  if(problems.length) { alert('Please review the flagged cover allocations before issuing this sheet. Invalid allocations must be reassigned; availability and allowance warnings require an explicit override.');render();return false; }
+  const incomplete=sheetRows(UI.date).filter(r=>!r.cover).length;
+  return !incomplete || confirm(incomplete+' class(es) still need cover. Issue this sheet as an incomplete draft?');
+}
+const copyOriginal=copyOut;
+copyOut=async function(kind) { if(FILE.ready && !await syncFile(false)) {toast('Check the shared save before issuing cover.');return;} if(outputAllowed()) return copyOriginal(kind); };
+// Capture stops read-only mutations before existing delegated handlers execute.
+const viewActions=new Set(['day','today','tab','sel','closeSel','trMode','copyHtml','copyText','print','exportData','pasteBackup','linkFolder','openFile','createFile','reconnectFile','reconnectAll','scanNow','unlinkFolder','unlinkFile','showRecovery','downloadRecovery','closeRecovery','fixAllocation','takeEditing','releaseEditing','reloadShared','retrySave']);
+document.addEventListener('click',e=>{
+  const b=e.target.closest('[data-act]');if(!b)return;const act=b.dataset.act;
+  const stop=()=>{e.preventDefault();e.stopImmediatePropagation();};
+  if(!viewActions.has(act) && !canEdit()){stop();toast('Viewing mode — choose Take editing to change the plan.');return;}
+  ACTION=act==='auto'?'Automatic allocation':act==='clearDay'?"Clear today's cover":act==='clearWeek'?'Clear week':act;
+  if(act==='takeEditing'){stop();takeEditing();}
+  else if(act==='releaseEditing'){stop();releaseEditing();}
+  else if(act==='retrySave'){stop();syncFile(false);}
+  else if(act==='reloadShared') {stop(); if(!FILE.ready){toast('Reconnect the shared file first.');return;} if(FILE.busy){toast('Wait for saving to finish.');return;} if(confirm('Reload the shared plan? Your local work will be kept as a recovery copy. Download it first if you need a separate backup.')) {rememberRecovery(S,'Before reloading shared plan',false);EDIT.blocked=false;EDIT.mode='view';STATUS.pending=false;undoStack=[];syncFile(true);} }
+  else if(act==='undoChange'){stop();const last=undoStack.pop();if(!last)return;rememberRecovery(S,'Before Undo',true);S=clone(last.data);LAST_STATE=clone(S);saveOriginal();buildModel();render();toast('Undone: '+last.label);}
+  else if(act==='showRecovery'){stop();showRecovery();}
+  else if(act==='closeRecovery'){stop();document.getElementById('recoveryPanel')?.remove();}
+  else if(act==='downloadRecovery' || act==='restoreRecovery'){stop();const item=recoveryCopies.find(x=>x.id===b.dataset.id);if(item){if(act==='downloadRecovery')downloadRecovery(item);else restore(JSON.stringify({data:item.data}));}}
+  else if(act==='fixAllocation'){stop();const [pid,slot]=b.dataset.key.split('|');if(!M.byId[pid]||!M.slots[+slot]||!wantsCover(UI.date,pid,+slot)){toast('This allocation belongs to a removed timetable entry. Remove it below.');if(canEdit()&&confirm('Remove this obsolete cover allocation?')){ACTION='Remove obsolete allocation';delete plan(UI.date,true).alloc[b.dataset.key];save();render();}return;}UI.sel={pid,slot:+slot};UI.tab='plan';render();}
+  else if(act==='print'){stop();(async()=>{if(FILE.ready&&!await syncFile(false))return;if(outputAllowed())window.print();})();}
+  else if(act==='assign') {
+    stop();const pid=b.dataset.pid,slot=+b.dataset.slot,cover=b.dataset.cover;
+    const c=candidates(UI.date,pid,slot).res.find(x=>x.p.id===cover);
+    if(!c){toast('This teacher is no longer available. Choose someone else.');render();return;}
+    const warnings=[];
+    if(c.disc)warnings.push('A department timetable disagrees with the master for this period.');
+    if(c.remaining<=0)warnings.push('This teacher has no cover allowance left this week.');
+    if(warnings.length && !confirm(warnings.join('\n')+'\n\nOverride these warnings and assign '+c.p.name+'?'))return;
+    const key=pid+'|'+slot,pl=plan(UI.date,true),old=pl.alloc[key]||{};
+    pl.alloc[key]={cover,supply:'',room:old.room||'',note:old.note||'',assignedClass:clsText(entryOf(M.byId[pid],slot)),discrepancyAck:c.disc?stable(c.disc):null,allowanceAck:c.remaining<=0?c.used+1:null};
+    save();render();toast(c.p.name+' assigned.');
+  }
+},true);
+document.addEventListener('change',e=>{
+  const t=e.target;
+  const readOnly=['dateIn','trFrom','trTo','weekOnly','upBackup'];
+  if(readOnly.includes(t.id))return;
+  if(!canEdit()){e.stopImmediatePropagation();e.preventDefault();toast('Viewing mode — choose Take editing first.');render();return;}
+  ACTION=t.id==='upMaster'?'Upload master':t.id==='upDept'?'Upload department timetables':'Change '+(t.id||t.className);
+},true);
+window.addEventListener('beforeunload',e=>{if(STATUS.pending || (STATUS.error && EDIT.mode==='edit')){e.preventDefault();e.returnValue='';}});
+// Direct browser printing also carries a visible validation warning.
+window.addEventListener('beforeprint',()=>{
+  document.getElementById('printCheck')?.remove();
+  const problems=checks(UI.date);if(!problems.length)return;
+  const div=document.createElement('div');div.id='printCheck';div.textContent='DRAFT — COVER HAS UNRESOLVED ERRORS. '+problems.map(x=>x.hard.concat(x.warnings).join('; ')).join(' / ');div.style.cssText='border:3px solid #900;padding:12px;font-weight:bold';document.getElementById('main').prepend(div);
+});
+window.addEventListener('afterprint',()=>document.getElementById('printCheck')?.remove());
 
 /* ---------- start ---------- */
 UI.date = toSchoolDay(iso(new Date()));
