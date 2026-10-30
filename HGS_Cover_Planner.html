@@ -388,6 +388,47 @@ td.num,th.num{text-align:center}
   .ver .btn{padding:8px 12px}
 }
 
+/* Staff names open their timetable */
+.pname{cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;text-decoration-thickness:1px}
+.pname:hover{color:var(--link);text-decoration-style:solid}
+@media print{.pname{text-decoration:none}}
+.rep{font-weight:700}
+/* Timetable window */
+body.tt-open{overflow:hidden}
+.ttwrap{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-start;justify-content:center;padding:calc(20px + env(safe-area-inset-top,0px)) 16px 20px}
+.ttback{position:absolute;inset:0;background:rgba(15,14,40,.55)}
+.ttpanel{position:relative;background:var(--bg);border-radius:16px;width:min(1180px,100%);max-height:100%;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:12px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.tthead{display:flex;flex-wrap:wrap;gap:10px 20px;justify-content:space-between;align-items:center}
+.tthead h2{font-size:1.5rem}
+.ttwk{font-family:var(--f-display);font-size:1.05rem}
+.iconbtn2{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 11px;font-size:1rem;line-height:1}
+.ttscroll{overflow-x:auto}
+table.ttgrid{border-collapse:separate;border-spacing:4px;width:100%;table-layout:fixed;min-width:760px}
+table.ttgrid th,table.ttgrid td{padding:0;border:0;background:transparent;position:static;vertical-align:stretch}
+table.ttgrid thead th{text-align:center;font-size:.72rem}
+table.ttgrid thead th:first-child{width:62px}
+table.ttgrid tbody th{width:62px;font-family:var(--f-display);font-size:.95rem;text-transform:none;letter-spacing:0;color:var(--ink);text-align:left}
+table.ttgrid tr.today th{color:var(--link);text-decoration:underline}
+.ttc{width:100%;height:100%;min-height:78px;text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:5px 7px;display:flex;flex-direction:column;gap:1px;font-size:.8rem;line-height:1.25}
+.ttc .p{font-family:var(--f-data);font-size:.68rem;color:var(--muted)}
+.ttc .c{font-weight:700;overflow-wrap:anywhere}
+.ttc .s{color:var(--muted);overflow-wrap:anywhere}
+.ttc.fr,.ttc.na{background:transparent;border-style:dashed}
+.ttc.na{opacity:.6}
+.ttc.cv{background:var(--y-bg);border:2px solid var(--y-bd);color:var(--y-fg)}
+.ttc.cv .s,.ttc.cv .p{color:var(--y-fg)}
+.ttc.chg{box-shadow:inset 0 0 0 2px var(--accent)}
+.ttc.ab{background-image:repeating-linear-gradient(135deg,transparent 0 8px,var(--surface2) 8px 10px)}
+.ttc.sel{outline:3px solid var(--gold);outline-offset:1px}
+.ttc:hover{border-color:var(--muted)}
+.tttag{display:inline-block;align-self:flex-start;margin-top:3px;border-radius:99px;padding:0 6px;font-size:.66rem;font-weight:700;background:var(--accent);color:var(--accent-ink)}
+.tttag.ab{background:var(--surface2);color:var(--ink);border:1px solid var(--line)}
+.tttag.lk{background:var(--lock-bg);color:var(--lock-ink)}
+.tted{border:2px solid var(--accent);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;background:var(--surface)}
+.tted .fields{grid-template-columns:minmax(0,1fr)}
+.ttcover{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;background:var(--y-bg);border:1px solid var(--y-bd);border-radius:10px;padding:8px 12px}
+.ttoffer{display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line);padding-top:10px}
+@media (max-width:700px){.ttwrap{padding:0}.ttpanel{border-radius:0;max-height:100%;height:100%;padding:14px 14px calc(20px + env(safe-area-inset-bottom,0px))}}
 @media print{
   body{background:#fff;color:#000}
   .band,.srcline,.toolbar,.wm,.noprint,.toast{display:none!important}
@@ -773,6 +814,7 @@ S.versions = S.versions || []; S.plans = S.plans || []; if (Array.isArray(S.plan
 S.activeMaster = S.activeMaster || 'builtin';
 S.settings = Object.assign({ faculty: {}, avail: {}, allowance: {} }, S.settings || {});
 function save() {
+  if (M && M.version) applyStanding();
   for (const k of Object.keys(S.plans)) { const p = S.plans[k]; if (!Object.keys(p.absent).length && !Object.keys(p.alloc).length) delete S.plans[k]; }
   try { localStorage.setItem(LS, JSON.stringify(S)); storageOK = true; } catch (e) { storageOK = false; }
   if (FILE.ready) fileSoon();
@@ -1179,20 +1221,32 @@ function scopeSelect(ver) {
 function coverable(p) { if (p.placeholder) return false; const o = S.settings.avail[p.id]; return o == null ? defaultCoverable(p) : !!o; }
 function allowance(p) { const o = S.settings.allowance[p.id]; return (o == null || o === '') ? p.allowance : Number(o); }
 function slotLabel(i) { const s = M.slots[i]; return 'P' + s.period; }
-function entryOf(p, i) { const c = p && p.cells[i]; return c && c.list ? c.list : null; }
+/* One-week timetable changes: S.settings.ttWeek[pid][monday][slot] = "3G1 Eng @ A117" ('' free, '.' not in), made from a
+   teacher's timetable for one week only. Every-week changes are the staff edits (S.settings.edits), applied to p.cells. */
+const weekKey = date => mondayOf(date);
+function weekChange(pid, slot, date) { const w = date && (S.settings.ttWeek || {})[pid]; const o = w && w[weekKey(date)]; return o && (slot in o) ? o[slot] : undefined; }
+// A teacher's cell for a period: on `date` (with that week's changes), or their every-week timetable when no date is given
+function cellOn(p, i, date) {
+  if (!p) return null;
+  const v = weekChange(p.id, i, date);
+  return v === undefined ? p.cells[i] : cellFrom(v, p, p.cells[i]);
+}
+function entryOf(p, i, date) { const c = cellOn(p, i, date); return c && c.list ? c.list : null; }
 function needsCover(list) { return list && list.some(e => !TT.isNonClass(e.t)); }
 /* ---------- locked periods: a class that needs no cover every week (a standing arrangement) until unlocked ----------
    S.settings.locks['pid|slot'] = { cls, note, since, until }. A lock made for one class pauses if the master puts a different class there. */
 const PADLOCK = '<svg class="padlock" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="10.5" rx="2.2" fill="currentColor" fill-opacity=".15"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><path d="M12 14.6v2.6"/></svg>';
+// A staff name that opens their timetable (inside another button it is a plain span, so it isn't a button within a button)
+const pn = (pid, name, inBtn) => `<span class="pname" data-act="openTT" data-pid="${esc(pid)}"${inBtn ? '' : ' role="button" tabindex="0"'} title="Show ${esc(name)}'s timetable">${esc(name)}</span>`;
 const clsText = list => list ? list.map(e => e.t.replace(/\n/g, ' ')).join(' / ') : '';
 function lockOf(pid, slot, date) {
   const l = (S.settings.locks || {})[pid + '|' + slot]; if (!l) return null;
   if (l.since && date && date < l.since) return null;
   if (l.until && date && date > l.until) return null;
-  return Object.assign({}, l, { stale: !!l.cls && clsText(entryOf(M.byId[pid], slot)) !== l.cls });
+  return Object.assign({}, l, { stale: !!l.cls && clsText(entryOf(M.byId[pid], slot, date)) !== l.cls });
 }
 function isLocked(pid, slot, date) { const l = lockOf(pid, slot, date); return !!l && !l.stale; }
-function wantsCover(date, pid, slot) { return absentAt(date, pid, slot) && needsCover(entryOf(M.byId[pid], slot)) && !isLocked(pid, slot, date); }
+function wantsCover(date, pid, slot) { return absentAt(date, pid, slot) && needsCover(entryOf(M.byId[pid], slot, date)) && !isLocked(pid, slot, date); }
 
 /* ---------- plans ---------- */
 function plan(date, create) {
@@ -1214,9 +1268,9 @@ function phasedOn(date, pid) {
 function phasedAbsence(date, pid) {
   const ph = phasedOn(date, pid); if (!ph) return null;
   const ds = M.dayPeriods[dayIdx(date)] || [], person = M.byId[pid];
-  if (!ds.some(s => person && entryOf(person, s))) return null;   // no classes that day (part-time, or all free): nothing to cover
+  if (!ds.some(s => person && entryOf(person, s, date))) return null;   // no classes that day (part-time, or all free): nothing to cover
   if (!ds.some(s => ph.inSet.has(s))) return { periods: null };
-  const off = ds.filter(s => person && entryOf(person, s) && !ph.inSet.has(s));
+  const off = ds.filter(s => person && entryOf(person, s, date) && !ph.inSet.has(s));
   return off.length ? { periods: off } : null;
 }
 function absentees(date) {
@@ -1247,7 +1301,7 @@ function coverSlotsOn(date, pid, exKey) {
 }
 function candidates(date, absentId, slot) {
   const key = absentId + '|' + slot;
-  const list = entryOf(M.byId[absentId], slot) || [];
+  const list = entryOf(M.byId[absentId], slot, date) || [];
   const cdept = list.length ? list[0].dept : M.byId[absentId].depts[0];
   const usage = weekUsage(date, date, key);
   const day = M.slots[slot].day, ds = M.dayPeriods[day];
@@ -1256,11 +1310,11 @@ function candidates(date, absentId, slot) {
   for (const p of M.people) {
     if (p.id === absentId || !coverable(p)) continue;
     if (absentAt(date, p.id, slot) || phasedOn(date, p.id) || p.offDays.includes(day)) continue;
-    if (p.cells[slot]) continue;
+    if (cellOn(p, slot, date)) continue;
     const covers = coverSlotsOn(date, p.id, key);
     if (covers.includes(slot)) continue;
-    const inDay = ds.filter(s => !(p.cells[s] && p.cells[s].out) && !absentAt(date, p.id, s)).length;
-    const teachToday = ds.filter(s => p.cells[s] && p.cells[s].list).length;
+    const inDay = ds.filter(s => { const c = cellOn(p, s, date); return !(c && c.out) && !absentAt(date, p.id, s); }).length;
+    const teachToday = ds.filter(s => entryOf(p, s, date)).length;
     const load = teachToday + covers.length;
     const used = (usage[p.id] || { total: 0 }).total;
     const remaining = allowance(p) - used;
@@ -1278,9 +1332,16 @@ function freeRooms(date, slot, exKey) {
   // rooms released by absent teachers whose classes have been moved elsewhere
   for (const [k, a] of Object.entries(pl.alloc)) {
     const [pid, s] = k.split('|'); if (+s !== slot) continue;
-    const l = entryOf(M.byId[pid], slot); const own = l && l[0].room;
+    const l = entryOf(M.byId[pid], slot, date); const own = l && l[0].room;
     if (a.room && own && a.room !== own && k !== exKey) { used.delete(own); used.add(a.room); }
     if (k === exKey && own) used.delete(own);
+  }
+  // rooms changed for this week only
+  for (const pid of Object.keys(S.settings.ttWeek || {})) {
+    if (weekChange(pid, slot, date) === undefined || !M.byId[pid]) continue;
+    const was = entryOf(M.byId[pid], slot), now = entryOf(M.byId[pid], slot, date);
+    if (was && was[0].room) used.delete(was[0].room);
+    if (now && now[0].room) used.add(now[0].room);
   }
   return M.rooms.filter(r => !used.has(r));
 }
@@ -1322,6 +1383,7 @@ function render() {
       : `<section class="panel stack"><h2>Link the timetables folder to start</h2>
       <p class="note">The planner doesn't include any staff timetables. ${FOLDER.supported ? 'Link the shared OneDrive folder that holds the master and department timetables, and the planner reads them straight from there, picking up changes as they are saved.' : 'Open the planner from the shared OneDrive folder in Microsoft Edge or Google Chrome to read the timetables from there, or upload the master on the Timetables tab.'}</p>
       <div class="row">${FOLDER.supported ? '<button class="btn primary" data-act="linkFolder">Link the timetables folder</button>' : ''}<button class="btn" data-act="tab" data-tab="timetables">Go to Timetables</button></div></section>`);
+    renderTT();
     return;
   }
   m.innerHTML = srcLine() + fn();
@@ -1329,6 +1391,7 @@ function render() {
   if (UI.tab === 'staff') fillStaff();
   if (UI.tab === 'timetables') fillDisc();
   document.body.classList.toggle('sel-open', !!document.querySelector('#main .alloc'));
+  renderTT();
 }
 /* Phone layout: give each table cell its column name so rows can be shown as cards */
 function labelTables(root) {
@@ -1365,7 +1428,7 @@ function renderPlan() {
       const ph = !lg && phasedOn(date, pid);
       const long = lg ? `<div class="meta"><span class="tag on">${esc(lg.note || 'Off for longer')}</span> ${lg.back ? 'back ' + esc(fmtDate(lg.back, { weekday: 'short', day: 'numeric', month: 'short' })) : 'return date not set'}</div>`
         : ph ? `<div class="meta"><span class="tag on">${esc(ph.p.note || 'Phased return')}</span> ${ph.p.back ? 'fully back ' + esc(fmtDate(ph.p.back, { weekday: 'short', day: 'numeric', month: 'short' })) : 'full return date not set'}</div>` : '';
-      return `<div class="abs"><div class="top"><span class="nm">${esc(p.name)}</span>${lg || ph ? '' : `<button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button>`}</div>
+      return `<div class="abs"><div class="top"><span class="nm">${pn(p.id, p.name)}</span>${lg || ph ? '' : `<button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button>`}</div>
         <div class="meta">${esc(p.depts.map(short).join(' · '))}</div>${long}
         <div class="ptog" role="group" aria-label="Periods absent">${ds.map(s => `<button data-act="togP" data-pid="${pid}" data-slot="${s}" aria-pressed="${absentAt(date, pid, s)}">${slotLabel(s)}</button>`).join('')}</div>
         ${a.periods ? `<button class="linkbtn" data-act="wholeDay" data-pid="${pid}">Mark whole day</button>` : '<span class="meta">Whole day</span>'}</div>`;
@@ -1388,7 +1451,7 @@ function renderPlan() {
 function teacherCard(pid, ds) {
   const date = UI.date, p = M.byId[pid], pl = plan(date);
   const tiles = ds.map(s => {
-    const c = p.cells[s], list = entryOf(p, s), absent = absentAt(date, pid, s);
+    const c = cellOn(p, s, date), list = entryOf(p, s, date), absent = absentAt(date, pid, s);
     const d = M.disc[pid + '|' + s];
     const tri = d ? `<span class="tri" title="${esc(d.map(x => x.version + ': ' + x.other.replace(/\n/g, ' ') + ' (master: ' + x.master.replace(/\n/g, ' ') + ')').join('\n'))}">⚠</span>` : '';
     const sel = UI.sel && UI.sel.pid === pid && UI.sel.slot === s ? ' sel' : '';
@@ -1401,14 +1464,14 @@ function teacherCard(pid, ds) {
     const lk = lockOf(pid, s, date);
     if (lk && !lk.stale) return `<button class="tile locked${sel}" data-act="sel" data-pid="${pid}" data-slot="${s}" title="Locked every week${lk.note ? ': ' + esc(lk.note) : ''}">${tri}<span class="p">${slotLabel(s)} · <span class="mono">${esc(list[0].room || '')}</span></span>
       <span class="c">${esc(cls.map(x => x.cls).join(' / '))}</span><span class="s">${esc(cls.map(x => x.subj).join(' / '))}</span><span class="st">Locked${lk.note ? ': ' + esc(lk.note) : ''}</span><span class="bigl">${PADLOCK}</span></button>`;
-    const status = a && (a.cover || a.supply) && !allocationOK(date, pid + '|' + s, a) ? `<span class="st">⚠ Reassign: ${esc(allocationProblems(date, pid + '|' + s, a).join('; '))}</span>` : allocationOK(date, pid + '|' + s, a) ? `<span class="st">✓ ${esc(a.cover ? M.byId[a.cover]?.name : a.supply)}${a.room ? ' · ' + esc(a.room) : ''}</span>${a.cover && fullDayOn(date, a.cover, M.slots[s].day) ? '<span class="fulltag">Full day</span>' : ''}`
+    const status = a && (a.cover || a.supply) && !allocationOK(date, pid + '|' + s, a) ? `<span class="st">⚠ Reassign: ${esc(allocationProblems(date, pid + '|' + s, a).join('; '))}</span>` : allocationOK(date, pid + '|' + s, a) ? `<span class="st">✓ ${a.cover && M.byId[a.cover] ? pn(a.cover, M.byId[a.cover].name, true) : esc(a.supply)}${a.room ? ' · ' + esc(a.room) : ''}</span>${a.cover && fullDayOn(date, a.cover, M.slots[s].day) ? '<span class="fulltag">Full day</span>' : ''}`
       : nc ? '<span class="st muted">No cover needed</span>' : '<span class="st">Needs cover</span>';
     const kind = allocationOK(date, pid + '|' + s, a) ? 'done' : nc ? '' : 'need';
     return `<button class="tile ${kind}${sel}" data-act="sel" data-pid="${pid}" data-slot="${s}">${tri}<span class="p">${slotLabel(s)} · <span class="mono">${esc(list[0].room || '')}</span></span>
       <span class="c">${esc(cls.map(x => x.cls).join(' / '))}</span><span class="s">${esc(cls.map(x => x.subj).join(' / '))}</span>${status}</button>`;
   }).join('');
   const panel = UI.sel && UI.sel.pid === pid ? allocPanel(pid, UI.sel.slot) : '';
-  return `<article class="tcard"><div class="thead"><h2>${esc(p.name)}</h2><span class="meta">${esc(p.depts.join(' · '))}${p.baseRoom ? ' · base room <span class="mono">' + esc(p.baseRoom) + '</span>' : ''}</span></div>
+  return `<article class="tcard"><div class="thead"><h2>${pn(p.id, p.name)}</h2><span class="meta">${esc(p.depts.join(' · '))}${p.baseRoom ? ' · base room <span class="mono">' + esc(p.baseRoom) + '</span>' : ''}</span></div>
     ${longBar(pid)}<div class="tiles" style="--n:${ds.length}">${tiles}</div>${panel}</article>`;
 }
 // Above the classes: put someone into future cover (e.g. a sick line), or show and change how long they are off
@@ -1466,7 +1529,7 @@ function phWeeksFor(d) {
   d.weeks.length = n;
 }
 function candChip(c) {
-  return `<span class="chip b-${c.band}">${esc(c.p.name)}${c.disc ? ' <span title="A department timetable shows this teacher busy this period">⚠</span>' : ''}</span>`;
+  return `<span class="chip b-${c.band}">${pn(c.p.id, c.p.name, true)}${c.disc ? ' <span title="A department timetable shows this teacher busy this period">⚠</span>' : ''}</span>`;
 }
 function candMeta(c, showDept) {
   const bits = [];
@@ -1480,13 +1543,13 @@ function candMeta(c, showDept) {
 function fullDayOn(date, pid, day) {
   const p = M.byId[pid]; if (!p) return false;
   const ds = M.dayPeriods[day] || [];
-  const inDay = ds.filter(s => !(p.cells[s] && p.cells[s].out) && !absentAt(date, pid, s)).length;
-  const load = ds.filter(s => p.cells[s] && p.cells[s].list).length + coverSlotsOn(date, pid).filter(s => M.slots[s].day === day).length;
+  const inDay = ds.filter(s => { const c = cellOn(p, s, date); return !(c && c.out) && !absentAt(date, pid, s); }).length;
+  const load = ds.filter(s => entryOf(p, s, date)).length + coverSlotsOn(date, pid).filter(s => M.slots[s].day === day).length;
   return inDay > 0 && load >= inDay;
 }
 function allocPanel(pid, slot) {
   const date = UI.date, p = M.byId[pid], key = pid + '|' + slot, pl = plan(date);
-  const list = entryOf(p, slot);
+  const list = entryOf(p, slot, date);
   if (!list) {
     const d = M.disc[key] || [];
     return `<div class="alloc"><div class="ah"><h3>${slotLabel(slot)} · free in the master</h3><button class="btn small" data-act="closeSel">Close</button></div>
@@ -1521,6 +1584,9 @@ function allocPanel(pid, slot) {
   const areas = {}; rooms.forEach(r => (areas[roomArea(r)] = areas[roomArea(r)] || []).push(r));
   const roomOpts = `<option value="">Stay in ${esc(own || 'timetabled room')}</option>` + Object.entries(areas).map(([g, rs]) => `<optgroup label="${esc(g)}">${rs.map(r => `<option value="${esc(r)}" ${a.room === r ? 'selected' : ''}>${esc(r)}${roomFloor(r) ? ' — ' + roomFloor(r) : ''}</option>`).join('')}</optgroup>`).join('');
   const dl = M.disc[key] || [];
+  const st = a.standing && (S.settings.standing || {})[a.standing];
+  const repeat = a.cover && !st ? `<div class="row meta">Repeat ${esc(M.byId[a.cover]?.name || '')} every ${esc(M.days[M.slots[slot].day])} ${slotLabel(slot)} until <input type="date" id="repeatUntil" min="${addDays(date, 7)}" value="${esc(defaultUntil(pid, date))}"><button class="btn small" data-act="repeatCover" data-pid="${pid}" data-slot="${slot}">Repeat this cover</button></div>`
+    : st ? `<div class="row meta">${STANDING_ICON} Repeats every ${esc(M.days[M.slots[slot].day])} ${slotLabel(slot)} until ${esc(fmtDate(st.until, { weekday: 'short', day: 'numeric', month: 'short' }))}<button class="linkbtn" data-act="stopStanding" data-id="${esc(a.standing)}" data-date="${date}">Stop repeating after today</button></div>` : '';
   const cur = a.cover || a.supply ? `<div class="current"><span>Covered by</span>${a.cover ? candChipFor(a.cover) : `<span class="chip b-y">${esc(a.supply)}</span>`}${a.room ? `<span>in <b class="mono">${esc(a.room)}</b></span>` : ''}${a.cover && fullDayOn(date, a.cover, M.slots[slot].day) ? '<span class="fulltag">Full day: teaching every period</span>' : ''}<button class="linkbtn" data-act="clearAlloc" data-pid="${pid}" data-slot="${slot}">Remove cover</button></div>` : '';
   const ds = M.dayPeriods[M.slots[slot].day];
   const nextSlot = ds.find(s => s > slot && wantsCover(date, pid, s) && !(pl.alloc[pid + '|' + s] && (pl.alloc[pid + '|' + s].cover || pl.alloc[pid + '|' + s].supply)));
@@ -1529,7 +1595,7 @@ function allocPanel(pid, slot) {
       <div class="row">${nextSlot != null ? `<button class="btn small" data-act="sel" data-pid="${pid}" data-slot="${nextSlot}">Next class needing cover ›</button>` : ''}<button class="btn small" data-act="closeSel">Close</button></div></div>
     <div class="meta">${esc(cdept)} · ${esc(fac(cdept))} faculty</div>
     ${dl.map(x => `<div class="discbox">⚠ ${esc(x.version)} shows <b>${nl(x.other)}</b>${x.room ? ' in ' + esc(x.room) : ''}; the master has <b>${nl(x.master)}</b>.</div>`).join('')}
-    ${staleBox}${cur}
+    ${staleBox}${cur}${repeat}
     ${nextSlot != null ? `<div class="nextbar"><button class="btn primary" data-act="sel" data-pid="${pid}" data-slot="${nextSlot}">Next class needing cover ›</button></div>` : ''}
     <div class="choices">
       ${column('Internal cover', facHasOthers ? esc(short(cdept)) + ' department, then the rest of ' + esc(fac(cdept)) : esc(short(cdept)) + ' department', internal, intHtml, 'Nobody in the ' + (facHasOthers ? 'faculty' : 'department') + ' is free this period.')}
@@ -1547,7 +1613,7 @@ function allocPanel(pid, slot) {
 function candChipFor(id) {
   const p = M.byId[id]; if (!p) return `<span class="chip b-r">${esc(id)}</span>`;
   const used = (weekUsage(UI.date)[id] || { total: 0 }).total;
-  return `<span class="chip b-${band(allowance(p) - used)}">${esc(p.name)}</span>`;
+  return `<span class="chip b-${band(allowance(p) - used)}">${pn(p.id, p.name)}</span>`;
 }
 
 function autoFill(mode) {
@@ -1566,7 +1632,7 @@ function autoFill(mode) {
     if (!pick) { left++; continue; }
     if (mode === 'mix' && !int) fromExt++;
     const k = pid + '|' + s, cur = pl.alloc[k] || {};
-    pl.alloc[k] = { cover: pick.p.id, supply: '', room: cur.room || '', note: cur.note || '', assignedClass: clsText(entryOf(M.byId[pid],s)) }; filled++;
+    pl.alloc[k] = { cover: pick.p.id, supply: '', room: cur.room || '', note: cur.note || '', assignedClass: clsText(entryOf(M.byId[pid], s, date)) }; filled++;
   }
   save(); render();
   toast(jobs.length ? `${filled} class${filled === 1 ? '' : 'es'} covered${mode === 'mix' && fromExt ? ' (' + fromExt + ' from outside the faculty)' : ''}${left ? ', ' + left + ' still need cover' : ''}.` : 'Every class already has cover.');
@@ -1578,12 +1644,12 @@ function sheetRows(date) {
   const pl = plan(date), ds = M.dayPeriods[di] || [], rows = [];
   for (const s of ds) for (const pid of Object.keys(absentees(date))) {
     const p = M.byId[pid]; if (!p || !absentAt(date, pid, s)) continue;
-    const list = entryOf(p, s); if (!list) continue;
+    const list = entryOf(p, s, date); if (!list) continue;
     const cls = list.map(e => TT.splitClass(e.t));
     if (isLocked(pid, s, date)) continue;   // standing arrangement: left off the cover sheet and the email
     const a = pl.alloc[pid + '|' + s];
     if (!needsCover(list) && !(allocationOK(date, pid + '|' + s, a))) continue;
-    rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: a && !allocationOK(date, pid + '|' + s, a) && (a.cover || a.supply) ? 'REASSIGN — ' + allocationProblems(date, pid + '|' + s, a).join('; ') : a ? (a.cover ? M.byId[a.cover]?.name : a.supply) || '' : '', coverRoom: a && a.room ? a.room : (list[0].room || ''), moved: !!(a && a.room && a.room !== list[0].room), note: a ? a.note || '' : '' });
+    rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, absentId: pid, coverId: a && a.cover && allocationOK(date, pid + '|' + s, a) ? a.cover : '', room: list[0].room || '', cover: a && !allocationOK(date, pid + '|' + s, a) && (a.cover || a.supply) ? 'REASSIGN — ' + allocationProblems(date, pid + '|' + s, a).join('; ') : a ? (a.cover ? M.byId[a.cover]?.name : a.supply) || '' : '', coverRoom: a && a.room ? a.room : (list[0].room || ''), moved: !!(a && a.room && a.room !== list[0].room), note: a ? a.note || '' : '' });
   }
   return rows;
 }
@@ -1595,13 +1661,13 @@ function sheetGroups(date) {
 function renderSheet() {
   const date = UI.date, groups = sheetGroups(date);
   const absentNames = Object.keys(absentees(date)).filter(id => M.byId[id]).map(id => M.byId[id].name);
-  const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${esc(t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b></td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
+  const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${pn(rs[0].absentId, t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.coverId ? pn(r.coverId, r.cover) : r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b></td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
   return `<div class="toolbar noprint"><button class="btn primary" data-act="copyHtml">Copy for email</button><button class="btn" data-act="copyText">Copy as plain text</button>
       ${IN_FRAME ? '' : '<button class="btn" data-act="print">Print</button>'}
       <span class="note">Paste into Outlook or Teams to send to all staff.</span></div>
     <div class="sheet" id="sheetOut">
       <div class="sh"><img src="${BADGE}" alt=""><div><div class="meta">Hamilton Grammar School</div><h2>Cover for ${esc(fmtDate(date))}</h2></div></div>
-      <p><b>Staff absent:</b> ${absentNames.length ? esc(absentNames.join(', ')) : 'none recorded'}</p>
+      <p><b>Staff absent:</b> ${absentNames.length ? Object.keys(absentees(date)).filter(id => M.byId[id]).map(id => pn(id, M.byId[id].name)).join(', ') : 'none recorded'}</p>
       <div class="tablewrap"><table class="bystaff cards" style="--cols:4"><thead><tr><th>Absent teacher</th><th>Period</th><th>Class</th><th>Covered by</th><th>Room</th><th>Notes</th></tr></thead><tbody>${tbody}</tbody></table></div>
     </div>`;
 }
@@ -1681,8 +1747,8 @@ function rangeLog(R) {
     if (d < R.from || d > R.to) continue;
     for (const [k, a] of Object.entries(pl.alloc)) {
       if (!a.cover && !a.supply) continue;
-      const [pid, s] = k.split('|'); const p = M.byId[pid]; const l = entryOf(p, +s);
-      out.push({ d, s: +s, html: `<tr><td>${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="mono">${M.slots[+s] ? slotLabel(+s) : ''}</td><td>${l ? nl(l[0].t) : ''}</td><td>${esc(p ? p.name : pid)}</td><td>${a.cover ? candChipFor(a.cover) : esc(a.supply)}</td><td class="mono">${esc(a.room || (l ? l[0].room : ''))}</td></tr>` });
+      const [pid, s] = k.split('|'); const p = M.byId[pid]; const l = entryOf(p, +s, d);
+      out.push({ d, s: +s, html: `<tr><td>${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="mono">${M.slots[+s] ? slotLabel(+s) : ''}</td><td>${l ? nl(l[0].t) : ''}</td><td>${p ? pn(pid, p.name) : esc(pid)}</td><td>${a.cover ? candChipFor(a.cover) : esc(a.supply)}</td><td class="mono">${esc(a.room || (l ? l[0].room : ''))}</td></tr>` });
     }
   }
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : a.s - b.s);
@@ -1703,7 +1769,7 @@ function fillWeek() {
     .sort((a, b) => b.r.total - a.r.total || b.left - a.left || a.p.name.localeCompare(b.p.name));
   const cols = isWeek ? 10 : 7;
   document.getElementById('weekBody').innerHTML = rows.length ? rows.map(x => {
-    const lead = `<td class="c-name"><b>${esc(x.p.name)}</b></td><td class="c-dept">${esc(x.p.depts.map(short).join(' · '))}</td><td class="num c-allow">${allowance(x.p)}</td>`;
+    const lead = `<td class="c-name"><b>${pn(x.p.id, x.p.name)}</b></td><td class="c-dept">${esc(x.p.depts.map(short).join(' · '))}</td><td class="num c-allow">${allowance(x.p)}</td>`;
     const chip = `<td class="c-left"><span class="chip b-${band(x.left)}">${x.left}</span></td>`;
     if (isWeek) return `<tr>${lead}${x.r.perDay.map(n => `<td class="num">${n || '<span class="muted">·</span>'}</td>`).join('')}<td class="num c-used"><b>${x.r.total}</b></td>${chip}</tr>`;
     const maxI = x.r.perDay.indexOf(Math.max(...x.r.perDay));
@@ -1749,7 +1815,7 @@ function fillDisc() {
   const q = UI.discQ.toLowerCase();
   const rows = M.discList.filter(d => !q || ((M.byId[d.id]?.name || '') + ' ' + d.version).toLowerCase().includes(q))
     .sort((a, b) => (M.byId[a.id]?.name || '').localeCompare(M.byId[b.id]?.name || '') || a.slot - b.slot);
-  document.getElementById('discBody').innerHTML = rows.length ? rows.map(d => `<tr><td class="c-wide"><b>${esc(M.byId[d.id]?.name)}</b></td><td>${esc(M.days[M.slots[d.slot].day].slice(0, 3))} ${slotLabel(d.slot)}</td><td>${nl(d.master)}</td><td><span class="warnline">⚠</span> ${nl(d.other)}${d.room && d.kind !== 'room' ? ' <span class="mono">' + esc(d.room) + '</span>' : ''}</td><td>${esc(d.version)}</td></tr>`).join('')
+  document.getElementById('discBody').innerHTML = rows.length ? rows.map(d => `<tr><td class="c-wide"><b>${M.byId[d.id] ? pn(d.id, M.byId[d.id].name) : ''}</b></td><td>${esc(M.days[M.slots[d.slot].day].slice(0, 3))} ${slotLabel(d.slot)}</td><td>${nl(d.master)}</td><td><span class="warnline">⚠</span> ${nl(d.other)}${d.room && d.kind !== 'room' ? ' <span class="mono">' + esc(d.room) + '</span>' : ''}</td><td>${esc(d.version)}</td></tr>`).join('')
     : `<tr><td colspan="5" class="empty">${deptVersions().length ?'Department timetables match the master.' : 'Upload department timetables to check them against the master.'}</td></tr>`;
 }
 
@@ -1780,13 +1846,152 @@ function lockList() {
     <p class="note">Periods that never need cover, every week, until unlocked. Lock a period from Plan cover by clicking the class and choosing "Lock every week".</p>
     <div class="tablewrap"><table class="cards" style="--cols:3"><thead><tr><th>Teacher</th><th>When</th><th>Class</th><th>Reason</th><th>Until</th><th></th></tr></thead><tbody>${rows.length ? rows.map(x => {
       const lk = lockOf(x.pid, x.slot), ended = x.l.until && x.l.until < today;
-      return `<tr><td class="c-wide"><b>${esc(x.p.name)}</b></td><td>${esc(M.days[M.slots[x.slot].day])} ${slotLabel(x.slot)}</td><td>${esc(x.l.cls)}${lk.stale ? ' <span class="tag warn">Paused: the master now has ' + esc(clsText(entryOf(x.p, x.slot)) || 'nothing') + '</span>' : ''}</td><td>${esc(x.l.note || '')}</td><td>${x.l.until ? esc(fmtDate(x.l.until, { day: 'numeric', month: 'short', year: 'numeric' })) + (ended ? ' <span class="tag">Ended</span>' : '') : 'Until unlocked'}</td><td><button class="btn small danger" data-act="unlock" data-pid="${x.pid}" data-slot="${x.slot}">Unlock</button></td></tr>`;
+      return `<tr><td class="c-wide"><b>${pn(x.p.id, x.p.name)}</b></td><td>${esc(M.days[M.slots[x.slot].day])} ${slotLabel(x.slot)}</td><td>${esc(x.l.cls)}${lk.stale ? ' <span class="tag warn">Paused: the master now has ' + esc(clsText(entryOf(x.p, x.slot)) || 'nothing') + '</span>' : ''}</td><td>${esc(x.l.note || '')}</td><td>${x.l.until ? esc(fmtDate(x.l.until, { day: 'numeric', month: 'short', year: 'numeric' })) + (ended ? ' <span class="tag">Ended</span>' : '') : 'Until unlocked'}</td><td><button class="btn small danger" data-act="unlock" data-pid="${x.pid}" data-slot="${x.slot}">Unlock</button></td></tr>`;
     }).join('') : '<tr><td colspan="6" class="empty">No locked periods.</td></tr>'}</tbody></table></div></div>`;
+}
+/* ---------- a teacher's timetable (opened by clicking any staff name) ----------
+   One week at a time: their classes (with this week's and every-week changes), cover they are doing in yellow, and absences.
+   Click a period to change it for this week only or every week, or to give them a class to cover, once or every week.
+   Repeating cover: S.settings.standing[id] = { abs, slot, cover, from, until, note }, filled into the cover plan on save. */
+const STANDING_ICON = '<span class="rep" aria-label="repeats weekly" title="Repeats weekly">↻</span>';
+function mayEdit() { try { return canEdit(); } catch (e) { return true; } }
+// Default end for repeating cover: the day before the absent teacher is due back, else four weeks
+function defaultUntil(abs, date) {
+  const lg = (S.settings.longAbs || {})[abs], ph = (S.settings.phased || {})[abs];
+  const back = (lg && lg.back) || (ph && ph.back);
+  return back && back > date ? addDays(back, -1) : addDays(date, 27);
+}
+function applyStanding() {
+  const st = S.settings.standing || {};
+  // cover made by a repeating arrangement that has been stopped, changed or no longer applies is taken off again
+  for (const [d, pl] of Object.entries(S.plans)) for (const [k, a] of Object.entries(pl.alloc)) {
+    if (!a.standing) continue;
+    const x = st[a.standing], [abs, sl] = k.split('|');
+    if (!x || d < x.from || d > x.until || (x.skip || []).includes(d) || x.abs !== abs || x.slot !== +sl || x.cover !== a.cover || !wantsCover(d, abs, +sl)) delete pl.alloc[k];
+  }
+  for (const [id, x] of Object.entries(st)) {
+    const P = M.byId[x.abs], C = M.byId[x.cover], sl = M.slots[x.slot]; if (!P || !C || !sl) continue;
+    let d = x.from; while (dayIdx(d) !== sl.day) d = addDays(d, 1);
+    for (; d <= x.until; d = addDays(d, 7)) {
+      const k = x.abs + '|' + x.slot;
+      if ((x.skip || []).includes(d) || !wantsCover(d, x.abs, x.slot)) continue;
+      const pl = plan(d, true), cur = pl.alloc[k];
+      if (cur && (cur.cover || cur.supply)) continue;   // cover chosen for that day stays
+      if (absentAt(d, x.cover, x.slot) || cellOn(C, x.slot, d) || C.offDays.includes(sl.day) || phasedOn(d, x.cover) || coverSlotsOn(d, x.cover, k).includes(x.slot)) continue;
+      pl.alloc[k] = { cover: x.cover, supply: '', room: (cur && cur.room) || '', note: (cur && cur.note) || x.note || '', assignedClass: clsText(entryOf(P, x.slot, d)), standing: id };
+    }
+  }
+}
+// Removing one day's repeating cover keeps it off that day only
+function skipStanding(a, date) { const x = a && a.standing && (S.settings.standing || {})[a.standing]; if (x) x.skip = [...new Set((x.skip || []).concat(date))]; }
+function addStanding(abs, slot, cover, from, until, note) {
+  S.settings.standing = S.settings.standing || {};
+  const id = uid();
+  S.settings.standing[id] = { abs, slot, cover, from, until, note: note || '' };
+  return id;
+}
+// Check a teacher can cover a class on a day, asking before overriding a discrepancy or an empty allowance (as Assign does)
+function confirmCover(date, abs, slot, cover) {
+  const c = candidates(date, abs, slot).res.find(x => x.p.id === cover);
+  if (!c) { toast(M.byId[cover].name + ' is not free to cover then.'); return null; }
+  const warnings = [];
+  if (c.disc) warnings.push('A department timetable disagrees with the master for this period.');
+  if (c.remaining <= 0) warnings.push('This teacher has no cover allowance left this week.');
+  if (warnings.length && !confirm(warnings.join('\n') + '\n\nOverride these warnings and assign ' + c.p.name + '?')) return null;
+  return c;
+}
+function ttCellsFor(p, date, slot) {
+  const pl = S.plans[date], covers = [];
+  if (pl) for (const [k, a] of Object.entries(pl.alloc)) if (a.cover === p.id && +k.split('|')[1] === slot) covers.push({ key: k, a, abs: k.split('|')[0] });
+  return covers;
+}
+function renderTT() {
+  let box = document.getElementById('ttModal');
+  const t = UI.tt;
+  if (!t || !M || !M.version || !M.byId[t.pid]) {
+    if (box) box.remove(); document.body.classList.remove('tt-open'); if (t && M && M.version) UI.tt = null; return;
+  }
+  const keep = box && box.querySelector('.ttpanel') ? box.querySelector('.ttpanel').scrollTop : 0;
+  if (!box) { box = document.createElement('div'); box.id = 'ttModal'; box.className = 'ttwrap noprint'; document.body.appendChild(box); }
+  document.body.classList.add('tt-open');
+  box.innerHTML = ttMarkup();
+  box.querySelector('.ttpanel').scrollTop = keep;
+}
+function ttMarkup() {
+  const t = UI.tt, p = M.byId[t.pid], mon = t.week, edit = mayEdit();
+  const maxP = Math.max(...M.dayPeriods.map(x => x.length));
+  const every = ((S.settings.edits || {})[p.id] || {}).cells || {};
+  let teach = 0, coverN = 0;
+  const rows = M.days.map((dn, di) => {
+    const date = addDays(mon, di);
+    const cells = M.dayPeriods[di].map(s => {
+      const c = cellOn(p, s, date), l = c && c.list, covers = ttCellsFor(p, date, s);
+      const wk = weekChange(p.id, s, date) !== undefined, ev = !wk && every[s] !== undefined;
+      const abs = absentAt(date, p.id, s) && !(c && c.out), lk = l && isLocked(p.id, s, date);
+      if (l) teach++; coverN += covers.length;
+      const sel = t.cell && t.cell.slot === s && t.cell.date === date ? ' sel' : '';
+      let body;
+      if (covers.length) body = covers.map(({ a, abs: ab }) => { const l2 = entryOf(M.byId[ab], s, date); const cl = l2 ? TT.splitClass(l2[0].t) : { cls: '', subj: '' };
+        return `<span class="c">${a.standing ? STANDING_ICON + ' ' : ''}Cover ${esc(cl.cls)}</span><span class="s">${esc(cl.subj)} for ${esc(M.byId[ab] ? M.byId[ab].name : ab)}</span><span class="s mono">${esc(a.room || (l2 && l2[0].room) || '')}</span>`; }).join('');
+      else if (c && c.out) body = '<span class="s">Not in</span>';
+      else if (l) { const cl = TT.splitClass(l[0].t); body = `<span class="c">${esc(cl.cls)}</span><span class="s">${esc(cl.subj)}</span><span class="s mono">${esc(l[0].room || '')}</span>`; }
+      else body = '<span class="s">Free</span>';
+      const tags = (wk ? '<span class="tttag">This week</span>' : '') + (ev ? '<span class="tttag">Every week</span>' : '') + (abs ? '<span class="tttag ab">Absent</span>' : '') + (lk ? '<span class="tttag lk">Locked</span>' : '');
+      const kind = covers.length ? 'cv' : c && c.out ? 'na' : l ? 'cl' : 'fr';
+      return `<td><button class="ttc ${kind}${wk || ev ? ' chg' : ''}${abs ? ' ab' : ''}${sel}" data-act="ttCell" data-slot="${s}" data-date="${date}"><span class="p">${slotLabel(s)}</span>${body}${tags}</button></td>`;
+    }).join('') + '<td></td>'.repeat(maxP - M.dayPeriods[di].length);
+    return `<tr${date === UI.date ? ' class="today"' : ''}><th>${esc(dn.slice(0, 3))} ${pISO(date).getDate()}</th>${cells}</tr>`;
+  }).join('');
+  const used = (weekUsage(mon)[p.id] || { total: 0 }).total;
+  return `<div class="ttback" data-act="ttClose"></div>
+  <section class="ttpanel" role="dialog" aria-modal="true" aria-label="${esc(p.name)}'s timetable">
+    <div class="tthead"><div><h2>${esc(p.name)}</h2><div class="meta">${esc(p.depts.join(' · '))}${p.baseRoom ? ' · base room <span class="mono">' + esc(p.baseRoom) + '</span>' : ''}</div></div>
+      <div class="row"><button class="iconbtn2" data-act="ttWeek" data-dir="-1" aria-label="Previous week">‹</button><span class="ttwk">w/c ${esc(fmtDate(mon, { day: 'numeric', month: 'short', year: 'numeric' }))}</span><button class="iconbtn2" data-act="ttWeek" data-dir="1" aria-label="Next week">›</button>
+      ${mon !== mondayOf(UI.date) ? '<button class="btn small" data-act="ttToday">Back to this week</button>' : ''}<button class="btn small" data-act="ttClose">Close</button></div></div>
+    <div class="row meta"><span>${teach} class${teach === 1 ? '' : 'es'} this week</span><span>${coverN} cover this week · ${Math.max(allowance(p) - used, 0)} of ${allowance(p)} allowance left</span>
+      <span class="legend"><span class="chip b-y">Cover</span><span class="tttag">Changed</span><span class="tttag ab">Absent</span></span></div>
+    <div class="ttscroll"><table class="ttgrid"><thead><tr><th></th>${Array.from({ length: maxP }, (_, i) => `<th>P${i + 1}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>
+    ${t.cell ? ttEditor(p, t.cell.slot, t.cell.date, edit) : '<p class="note">Click a period to change it for this week or every week, or to give them a class to cover.</p>'}
+  </section>`;
+}
+function ttEditor(p, slot, date, edit) {
+  const dis = edit ? '' : ' disabled';
+  const c = cellOn(p, slot, date), wk = weekChange(p.id, slot, date) !== undefined, ev = (((S.settings.edits || {})[p.id] || {}).cells || {})[slot] !== undefined;
+  const when = esc(fmtDate(date, { weekday: 'long', day: 'numeric', month: 'short' })) + ' ' + slotLabel(slot), dayName = esc(M.days[M.slots[slot].day]);
+  const covers = ttCellsFor(p, date, slot);
+  const coverHtml = covers.map(({ key, a, abs }) => {
+    const l = entryOf(M.byId[abs], slot, date), st = a.standing && (S.settings.standing || {})[a.standing];
+    return `<div class="ttcover"><b>Covering ${esc(l ? l[0].t.replace(/\n/g, ' ') : '')}</b> for ${M.byId[abs] ? pn(abs, M.byId[abs].name) : esc(abs)}${a.room || (l && l[0].room) ? ' in <span class="mono">' + esc(a.room || l[0].room) + '</span>' : ''}
+      ${st ? `<span class="meta">${STANDING_ICON} every ${dayName} ${slotLabel(slot)} until ${esc(fmtDate(st.until, { weekday: 'short', day: 'numeric', month: 'short' }))}</span><button class="btn small" data-act="stopStanding" data-id="${esc(a.standing)}" data-date="${date}"${dis}>Stop repeating after this day</button>`
+        : `<label class="row meta">Every ${dayName} until <input type="date" id="ttUntil" min="${addDays(date, 7)}" value="${esc(defaultUntil(abs, date))}"${dis}></label><button class="btn small" data-act="ttRepeat" data-key="${esc(key)}" data-date="${date}"${dis}>Repeat every week</button>`}
+      <button class="btn small danger" data-act="ttRemoveCover" data-key="${esc(key)}" data-date="${date}"${dis}>Remove this cover</button></div>`;
+  }).join('');
+  // classes needing cover that period, which this teacher could take
+  let offer = '';
+  if (!covers.length && !c && !absentAt(date, p.id, slot)) {
+    const pl = S.plans[date] || { alloc: {} };
+    const needs = Object.keys(absentees(date)).filter(ab => M.byId[ab] && ab !== p.id && wantsCover(date, ab, slot) && !allocationOK(date, ab + '|' + slot, pl.alloc[ab + '|' + slot]));
+    offer = needs.length ? `<div class="ttoffer"><span class="lbl">Classes needing cover then</span>${needs.map(ab => { const l = entryOf(M.byId[ab], slot, date);
+      return `<div class="row"><span><b>${esc(l[0].t.replace(/\n/g, ' '))}</b> for ${pn(ab, M.byId[ab].name)} <span class="mono">${esc(l[0].room || '')}</span></span>
+        <button class="btn small primary" data-act="ttCover" data-abs="${ab}" data-date="${date}" data-repeat="0"${dis}>Cover this day</button>
+        <button class="btn small" data-act="ttCover" data-abs="${ab}" data-date="${date}" data-repeat="1"${dis}>Every ${dayName} until…</button></div>`; }).join('')}
+      <label class="row meta">Repeat until <input type="date" id="ttUntil" min="${addDays(date, 7)}" value="${esc(defaultUntil(needs[0], date))}"${dis}></label></div>` : '';
+  }
+  return `<div class="tted"><div class="row"><b>${when}</b>${!edit ? '<span class="warnline">Viewing mode: choose Take editing to make changes.</span>' : ''}</div>
+    ${coverHtml}
+    <div class="fields"><div><label class="lbl" for="ttText">Their class this period</label><input type="text" id="ttText" value="${esc(cellToStr(c))}" placeholder="free"${dis}>
+      <div class="meta">Class as on the timetable, @ room if needed (e.g. "3G1 Eng @ A117"). Blank = free, a full stop (.) = not in school.</div></div></div>
+    <div class="row"><button class="btn primary" data-act="ttSave" data-scope="week" data-slot="${slot}" data-date="${date}"${dis}>Change for this week only</button>
+      <button class="btn" data-act="ttSave" data-scope="every" data-slot="${slot}" data-date="${date}"${dis}>Change for every week</button>
+      ${wk ? `<button class="linkbtn" data-act="ttUndo" data-scope="week" data-slot="${slot}" data-date="${date}"${dis}>Undo this week's change</button>` : ''}
+      ${ev ? `<button class="linkbtn" data-act="ttUndo" data-scope="every" data-slot="${slot}" data-date="${date}"${dis}>Back to the master timetable</button>` : ''}
+      <button class="linkbtn" data-act="ttCellClose">Close</button></div>
+    ${offer}</div>`;
 }
 function fillStaff() {
   const q = UI.staffQ.toLowerCase();
   const rows = M.people.filter(p => !p.placeholder && (!q || (p.name + ' ' + p.depts.join(' ')).toLowerCase().includes(q)));
-  document.getElementById('staffBody').innerHTML = rows.map(p => `<tr><td><input type="checkbox" class="availIn" data-pid="${p.id}" ${coverable(p) ? 'checked' : ''} aria-label="${esc(p.name)} can cover"></td><td><input type="checkbox" class="promIn" data-pid="${p.id}" ${isPromoted(p) ? 'checked' : ''} aria-label="${esc(p.name)} is promoted"></td><td class="c-name"><b>${esc(p.name)}</b>${p.added ? ' <span class="tag on">Added</span>' : p.edited ? ' <span class="tag">Edited</span>' : ''}${p.empty ? '<div class="meta">Empty timetable</div>' : ''}${p.aliases.length > 1 ? `<div class="meta">also listed as ${esc(p.aliases.filter(a => a !== p.name).join(', '))}</div>` : ''}</td><td class="c-dept">${esc(p.depts.map(short).join(' · '))}</td><td class="num">${p.teach}</td><td class="num">${p.free}</td><td class="num">${p.ent}</td><td><input type="number" class="allowIn" data-pid="${p.id}" value="${S.settings.allowance[p.id] != null ? esc(S.settings.allowance[p.id]) : ''}" placeholder="${p.allowance}" style="width:5.5em" aria-label="Cover allowance for ${esc(p.name)}"></td><td class="c-edit"><button class="btn small" data-act="editStaff" data-pid="${p.id}">Edit</button></td></tr>`).join('') || '<tr><td colspan="9" class="empty">No staff match.</td></tr>';
+  document.getElementById('staffBody').innerHTML = rows.map(p => `<tr><td><input type="checkbox" class="availIn" data-pid="${p.id}" ${coverable(p) ? 'checked' : ''} aria-label="${esc(p.name)} can cover"></td><td><input type="checkbox" class="promIn" data-pid="${p.id}" ${isPromoted(p) ? 'checked' : ''} aria-label="${esc(p.name)} is promoted"></td><td class="c-name"><b>${pn(p.id, p.name)}</b>${p.added ? ' <span class="tag on">Added</span>' : p.edited ? ' <span class="tag">Edited</span>' : ''}${p.empty ? '<div class="meta">Empty timetable</div>' : ''}${p.aliases.length > 1 ? `<div class="meta">also listed as ${esc(p.aliases.filter(a => a !== p.name).join(', '))}</div>` : ''}</td><td class="c-dept">${esc(p.depts.map(short).join(' · '))}</td><td class="num">${p.teach}</td><td class="num">${p.free}</td><td class="num">${p.ent}</td><td><input type="number" class="allowIn" data-pid="${p.id}" value="${S.settings.allowance[p.id] != null ? esc(S.settings.allowance[p.id]) : ''}" placeholder="${p.allowance}" style="width:5.5em" aria-label="Cover allowance for ${esc(p.name)}"></td><td class="c-edit"><button class="btn small" data-act="editStaff" data-pid="${p.id}">Edit</button></td></tr>`).join('') || '<tr><td colspan="9" class="empty">No staff match.</td></tr>';
   renderStaffEdit();
 }
 function renderStaffEdit() {
@@ -1889,7 +2094,7 @@ document.addEventListener('click', e => {
       const inp = document.getElementById('absAdd'); const p = inp.value.trim() && findPerson(inp.value);
       if (!p) { toast('No member of staff called "' + inp.value + '" in the master.'); return; }
       plan(date, true).absent[p.id] = { periods: null }; save();
-      const di = dayIdx(date); const first = (M.dayPeriods[di] || []).find(s => needsCover(entryOf(p, s)) && !isLocked(p.id, s, date));
+      const di = dayIdx(date); const first = (M.dayPeriods[di] || []).find(s => needsCover(entryOf(p, s, date)) && !isLocked(p.id, s, date));
       UI.sel = first != null ? { pid: p.id, slot: first } : null; render(); break;
     }
     case 'carry': { const prev = S.plans[stepSchoolDay(date, -1)]; const pl = plan(date, true); Object.keys(prev.absent).forEach(id => { if (!pl.absent[id]) pl.absent[id] = { periods: null }; }); save(); render(); break; }
@@ -1962,13 +2167,13 @@ document.addEventListener('click', e => {
       const pl = plan(date, true), k = pid + '|' + slot, cur = pl.alloc[k] || {};
       pl.alloc[k] = { cover: null, supply: v, room: cur.room || '', note: cur.note || '' }; save(); render(); break;
     }
-    case 'clearAlloc': { const pl = plan(date, true), k = pid + '|' + slot, cur = pl.alloc[k]; if (cur && (cur.room || cur.note)) { cur.cover = null; cur.supply = ''; } else delete pl.alloc[k]; save(); render(); break; }
+    case 'clearAlloc': { const pl = plan(date, true), k = pid + '|' + slot, cur = pl.alloc[k]; skipStanding(cur, date); if (cur && cur.standing) delete cur.standing; if (cur && (cur.room || cur.note)) { cur.cover = null; cur.supply = ''; } else delete pl.alloc[k]; save(); render(); break; }
     case 'tab': goTab(b.dataset.tab); break;
     case 'auto': autoFill(b.dataset.mode); break;
     case 'trMode': UI.trMode = b.dataset.mode; render(); break;
     case 'clearDay': {
       if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm: clear all cover today'; return; }
-      const pl = plan(date, true); Object.keys(pl.alloc).forEach(k => delete pl.alloc[k]); save(); render(); toast('Cover for today cleared.'); break;
+      const pl = plan(date, true); Object.keys(pl.alloc).forEach(k => { skipStanding(pl.alloc[k], date); delete pl.alloc[k]; }); save(); render(); toast('Cover for today cleared.'); break;
     }
     case 'addStaff': { const id = 'added-' + uid(); S.settings.added = (S.settings.added || []).concat(id); S.settings.edits = S.settings.edits || {}; S.settings.edits[id] = {}; UI.editId = id; buildModel(); render(); requestAnimationFrame(() => { const el = document.getElementById('seName'); if (el) { el.scrollIntoView({ block: 'center' }); el.focus(); } }); break; }
     case 'editStaff': UI.editId = pid; renderStaffEdit(); document.getElementById('staffEdit').scrollIntoView({ block: 'start', behavior: 'smooth' }); break;
@@ -2008,6 +2213,64 @@ document.addEventListener('click', e => {
     case 'createFile': chooseDataFile(true); break;
     case 'openFile': chooseDataFile(false); break;
     case 'reconnectFile': reconnectFile(); break;
+    case 'openTT': UI.tt = { pid, week: mondayOf(UI.date), cell: null }; render(); break;
+    case 'ttWeek': UI.tt.week = addDays(UI.tt.week, 7 * +b.dataset.dir); UI.tt.cell = null; render(); break;
+    case 'ttToday': UI.tt.week = mondayOf(UI.date); UI.tt.cell = null; render(); break;
+    case 'ttClose': UI.tt = null; render(); break;
+    case 'ttCell': UI.tt.cell = { slot, date: b.dataset.date }; render(); requestAnimationFrame(() => { const el = document.querySelector('.tted'); if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }); break;
+    case 'ttCellClose': UI.tt.cell = null; render(); break;
+    case 'ttSave': case 'ttUndo': {
+      const tp = M.byId[UI.tt.pid], d = b.dataset.date, wk = weekKey(d), v = act === 'ttSave' ? document.getElementById('ttText').value.trim() : null;
+      const W = S.settings.ttWeek = S.settings.ttWeek || {};
+      const dropWeek = () => { const o = W[tp.id] && W[tp.id][wk]; if (o) { delete o[slot]; if (!Object.keys(o).length) delete W[tp.id][wk]; if (!Object.keys(W[tp.id]).length) delete W[tp.id]; } };
+      if (b.dataset.scope === 'week') {
+        dropWeek();
+        if (act === 'ttSave' && v !== cellToStr(tp.cells[slot])) ((W[tp.id] = W[tp.id] || {})[wk] = W[tp.id][wk] || {})[slot] = v;
+        ACTION = 'Timetable change for one week';
+      } else {
+        const E = S.settings.edits = S.settings.edits || {}, e = E[tp.id] = E[tp.id] || {};
+        if (act === 'ttSave') { e.cells = Object.assign({}, e.cells, { [slot]: v }); dropWeek(); }
+        else { delete (e.cells || {})[slot]; if (e.cells && !Object.keys(e.cells).length) delete e.cells; if (!Object.keys(e).length) delete E[tp.id]; }
+        ACTION = 'Timetable change for every week';
+      }
+      buildModel(); save(); render();
+      toast(act === 'ttUndo' ? 'Change undone.' : tp.name + ' ' + slotLabel(slot) + (b.dataset.scope === 'week' ? ' changed for the week of ' + fmtDate(wk, { day: 'numeric', month: 'short' }) + '.' : ' changed for every week.'));
+      break;
+    }
+    case 'ttCover': {
+      const d = b.dataset.date, abs = b.dataset.abs, sl = UI.tt.cell.slot, k = abs + '|' + sl;
+      const until = b.dataset.repeat === '1' ? document.getElementById('ttUntil').value : '';
+      if (b.dataset.repeat === '1' && !(until > d)) { toast('Choose the date the repeating cover runs until.'); return; }
+      const c = confirmCover(d, abs, sl, UI.tt.pid); if (!c) return;
+      const pl = plan(d, true), old = pl.alloc[k] || {};
+      pl.alloc[k] = { cover: UI.tt.pid, supply: '', room: old.room || '', note: old.note || '', assignedClass: clsText(entryOf(M.byId[abs], sl, d)), discrepancyAck: c.disc ? stable(c.disc) : null, allowanceAck: c.remaining <= 0 ? c.used + 1 : null };
+      if (until) pl.alloc[k].standing = addStanding(abs, sl, UI.tt.pid, d, until, old.note);
+      ACTION = until ? 'Repeating cover' : 'Cover from timetable';
+      save(); render(); toast(c.p.name + ' covers ' + M.byId[abs].name + "'s class" + (until ? ' every ' + M.days[M.slots[sl].day] + ' until ' + fmtDate(until, { day: 'numeric', month: 'short' }) : '') + '.');
+      break;
+    }
+    case 'repeatCover': case 'ttRepeat': {
+      const d = b.dataset.date || date, k = b.dataset.key || pid + '|' + slot, [abs, sl] = k.split('|'), a = plan(d, true).alloc[k];
+      const until = document.getElementById(act === 'ttRepeat' ? 'ttUntil' : 'repeatUntil').value;
+      if (!a || !a.cover) return;
+      if (!(until > d)) { toast('Choose the date the repeating cover runs until.'); return; }
+      a.standing = addStanding(abs, +sl, a.cover, d, until, a.note);
+      ACTION = 'Repeating cover'; save(); render();
+      toast(M.byId[a.cover].name + ' covers this class every ' + M.days[M.slots[+sl].day] + ' until ' + fmtDate(until, { day: 'numeric', month: 'short' }) + '.');
+      break;
+    }
+    case 'stopStanding': {
+      const x = (S.settings.standing || {})[b.dataset.id]; if (!x) return;
+      x.until = b.dataset.date < x.until ? b.dataset.date : x.until;
+      ACTION = 'Stop repeating cover'; save(); render(); toast('Repeating cover stopped after ' + fmtDate(x.until, { weekday: 'long', day: 'numeric', month: 'short' }) + '.');
+      break;
+    }
+    case 'ttRemoveCover': {
+      const pl = plan(b.dataset.date, true), a = pl.alloc[b.dataset.key];
+      skipStanding(a, b.dataset.date); delete pl.alloc[b.dataset.key];
+      ACTION = 'Remove cover'; save(); render(); toast('Cover removed for that day.');
+      break;
+    }
     case 'reconnectAll': reconnectAll(); break;
     case 'lock': {
       const k = pid + '|' + slot, today = iso(new Date());
@@ -2065,6 +2328,10 @@ document.addEventListener('input', e => {
   if (t.id === 'weekQ') { UI.weekQ = t.value; fillWeek(); }
   else if (t.id === 'staffQ') { UI.staffQ = t.value; fillStaff(); }
   else if (t.id === 'discQ') { UI.discQ = t.value; fillDisc(); }
+});
+document.addEventListener('keydown', e => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('pname') && e.target.tabIndex >= 0) { e.preventDefault(); e.target.click(); }
+  else if (e.key === 'Escape' && UI.tt) { UI.tt = null; render(); }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'absAdd') { e.preventDefault(); document.querySelector('[data-act="addAbs"]').click(); } });
 // Tabs switch the view directly; the address-bar hash is only a bookmark and may be ignored by some viewers (e.g. the iPhone app)
@@ -2134,19 +2401,19 @@ function allocationProblems(date, key, a) {
   const [pid, rawSlot] = key.split('|'), slot = Number(rawSlot), issues = [], p = M.byId[a.cover];
   if (!M.byId[pid] || !M.slots[slot]) return ['class or teacher no longer in timetable'];
   if (!wantsCover(date,pid,slot)) issues.push('class no longer needs cover');
-  if (a.assignedClass && a.assignedClass !== clsText(entryOf(M.byId[pid],slot))) issues.push('class has changed since cover was allocated');
+  if (a.assignedClass && a.assignedClass !== clsText(entryOf(M.byId[pid],slot,date))) issues.push('class has changed since cover was allocated');
   if (a.cover) {
     if (!p) issues.push('cover teacher no longer in timetable');
     else {
       if (absentAt(date,p.id,slot)) issues.push(p.name + ' is absent');
       if (phasedOn(date,p.id)) issues.push(p.name + ' is on a phased return');
-      if (p.offDays.includes(M.slots[slot].day) || p.cells[slot]?.out) issues.push(p.name + ' is not in school');
-      else if (p.cells[slot]) issues.push(p.name + ' is timetabled elsewhere');
+      if (p.offDays.includes(M.slots[slot].day) || cellOn(p,slot,date)?.out) issues.push(p.name + ' is not in school');
+      else if (cellOn(p,slot,date)) issues.push(p.name + ' is timetabled elsewhere');
       if (!coverable(p)) issues.push(p.name + ' is unavailable for cover');
       if (coverSlotsOn(date,p.id,key).includes(slot)) issues.push(p.name + ' is double-booked');
     }
   }
-  if (a.room && !freeRooms(date,slot,key).includes(a.room) && a.room !== entryOf(M.byId[pid],slot)?.[0]?.room) issues.push('room ' + a.room + ' is occupied');
+  if (a.room && !freeRooms(date,slot,key).includes(a.room) && a.room !== entryOf(M.byId[pid],slot,date)?.[0]?.room) issues.push('room ' + a.room + ' is occupied');
   return issues;
 }
 function allocationOK(date, key, a) { return !!(a && (a.cover || a.supply) && !allocationProblems(date,key,a).length); }
@@ -2178,7 +2445,7 @@ function safetyMarkup() {
     ${STATUS.recoveryError ? '<p class="warnline">'+esc(STATUS.recoveryError)+'</p>' : ''}
     ${FILE.handle ? '<p class="meta">One person should edit at a time. For OneDrive folders, finish editing and allow OneDrive to sync before your colleague takes over. All editors must use this updated planner.</p>' : ''}
     ${rows.length ? '<div class="banner" style="margin-top:10px;margin-bottom:0"><b>Cover needs checking</b><ul>'+rows.map(r=>{
-      const [id,s]=r.key.split('|'); return '<li>'+esc(M.byId[id]?.name || id)+' '+esc(M.slots[+s] ? slotLabel(+s) : s)+': '+esc(r.hard.concat(r.warnings).join('; '))+' <button class="linkbtn" data-act="fixAllocation" data-key="'+esc(r.key)+'">Review</button></li>';
+      const [id,s]=r.key.split('|'); return '<li>'+(M.byId[id] ? pn(id, M.byId[id].name) : esc(id))+' '+esc(M.slots[+s] ? slotLabel(+s) : s)+': '+esc(r.hard.concat(r.warnings).join('; '))+' <button class="linkbtn" data-act="fixAllocation" data-key="'+esc(r.key)+'">Review</button></li>';
     }).join('')+'</ul></div>' : ''}
   </div>`;
 }
@@ -2285,7 +2552,7 @@ document.addEventListener('click',e=>{
     if(c.remaining<=0)warnings.push('This teacher has no cover allowance left this week.');
     if(warnings.length && !confirm(warnings.join('\n')+'\n\nOverride these warnings and assign '+c.p.name+'?'))return;
     const key=pid+'|'+slot,pl=plan(UI.date,true),old=pl.alloc[key]||{};
-    pl.alloc[key]={cover,supply:'',room:old.room||'',note:old.note||'',assignedClass:clsText(entryOf(M.byId[pid],slot)),discrepancyAck:c.disc?stable(c.disc):null,allowanceAck:c.remaining<=0?c.used+1:null};
+    pl.alloc[key]={cover,supply:'',room:old.room||'',note:old.note||'',assignedClass:clsText(entryOf(M.byId[pid],slot,UI.date)),discrepancyAck:c.disc?stable(c.disc):null,allowanceAck:c.remaining<=0?c.used+1:null};
     save();render();toast(c.p.name+' assigned.');
   }
 },true);
@@ -2307,6 +2574,9 @@ window.addEventListener('afterprint',()=>document.getElementById('printCheck')?.
 
 /* ---------- start ---------- */
 UI.date = toSchoolDay(iso(new Date()));
+// Looking at a timetable is allowed in viewing mode; changing it needs Take editing
+['openTT', 'ttWeek', 'ttToday', 'ttClose', 'ttCell', 'ttCellClose'].forEach(a => viewActions.add(a));
+
 buildModel();
 route();
 restoreFileLink().then(restoreFolderLink);
