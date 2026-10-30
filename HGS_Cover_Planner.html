@@ -23,6 +23,7 @@
   --warn:#b86e00; --warn-bg:#fff2d6;
   --done-bg:#e3f1df; --done-bd:#8cc283;
   --need-bg:#fff6e6; --need-bd:#e7a94a;
+  --lock-bg:#b3261e; --lock-ink:#ffffff;
   --f-display:"Marcellus", "Trajan Pro", Georgia, serif;
   --f-body:"Source Sans 3", "Segoe UI", system-ui, sans-serif;
   --f-data:"IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -38,6 +39,7 @@
   --r-bg:#3a2226; --r-fg:#e9b3b3; --r-bd:#6d3c42;
   --warn:#ffc061; --warn-bg:#3d2e12;
   --done-bg:#1e3320; --done-bd:#3f7a36; --need-bg:#3a2c14; --need-bd:#9a6b22;
+  --lock-bg:#9e2a2a; --lock-ink:#ffffff;
   --wm-opacity:.06; color-scheme:dark }}
 :root[data-theme="dark"]{
   --bg:#121222; --surface:#1b1b30; --surface2:#24243d; --ink:#ecebf7; --muted:#a5a4c0; --line:#33324f;
@@ -49,6 +51,7 @@
   --r-bg:#3a2226; --r-fg:#e9b3b3; --r-bd:#6d3c42;
   --warn:#ffc061; --warn-bg:#3d2e12;
   --done-bg:#1e3320; --done-bd:#3f7a36; --need-bg:#3a2c14; --need-bd:#9a6b22;
+  --lock-bg:#9e2a2a; --lock-ink:#ffffff;
   --wm-opacity:.06; color-scheme:dark }
 
 *{box-sizing:border-box}
@@ -138,6 +141,19 @@ label.lbl{display:block;font-size:.76rem;text-transform:uppercase;letter-spacing
 .tile.sel{outline:3px solid var(--accent);outline-offset:1px}
 .tile:not(.idle):hover{border-color:var(--muted)}
 .tri{position:absolute;top:5px;right:6px;color:var(--warn);font-size:1rem;line-height:1}
+/* Locked periods: a standing arrangement, no cover needed every week */
+.padlock{width:1em;height:1em;flex:none;vertical-align:-.12em}
+.tile.locked{background:var(--lock-bg);border-color:var(--lock-bg);color:var(--lock-ink);padding-right:46px}
+.tile.locked:hover{border-color:var(--lock-ink)}
+.tile.locked .p,.tile.locked .s,.tile.locked .st{color:var(--lock-ink)}
+.tile.locked .c{text-decoration:line-through;text-decoration-thickness:2px}
+.tile.locked .bigl{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:2.4rem;line-height:0}
+.lockbox{display:flex;gap:14px;align-items:flex-start;border:2px solid var(--r-fg);background:var(--r-bg);color:var(--r-fg);border-radius:12px;padding:14px}
+.lockbox .padlock{font-size:2.6rem}
+.lockbox .grow{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.lockbox b{color:var(--r-fg)}
+.lockbox .note,.lockbox .meta{color:var(--ink)}
+.lockform{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:8px}
 
 /* Allocation panel */
 .alloc{border:2px solid var(--accent);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:14px;background:var(--surface)}
@@ -279,6 +295,8 @@ td.num,th.num{text-align:center}
   .tile.idle{padding:7px 12px}
   .tile.idle .s + .s{display:none}
   .tri{top:6px;right:auto;left:4px;font-size:.8rem}
+  .tile.locked{padding-right:52px}
+  .tile.locked .bigl{font-size:2rem;right:12px}
 
   /* the cover chooser opens full screen */
   .alloc{position:fixed;inset:0;z-index:30;border:0;border-radius:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
@@ -1101,6 +1119,17 @@ function allowance(p) { const o = S.settings.allowance[p.id]; return (o == null 
 function slotLabel(i) { const s = M.slots[i]; return 'P' + s.period; }
 function entryOf(p, i) { const c = p && p.cells[i]; return c && c.list ? c.list : null; }
 function needsCover(list) { return list && list.some(e => !TT.isNonClass(e.t)); }
+/* ---------- locked periods: a class that needs no cover every week (a standing arrangement) until unlocked ----------
+   S.settings.locks['pid|slot'] = { cls, note, since, until }. A lock made for one class pauses if the master puts a different class there. */
+const PADLOCK = '<svg class="padlock" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="10.5" rx="2.2" fill="currentColor" fill-opacity=".15"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><path d="M12 14.6v2.6"/></svg>';
+const clsText = list => list ? list.map(e => e.t.replace(/\n/g, ' ')).join(' / ') : '';
+function lockOf(pid, slot, date) {
+  const l = (S.settings.locks || {})[pid + '|' + slot]; if (!l) return null;
+  if (l.until && date && date > l.until) return null;
+  return Object.assign({}, l, { stale: !!l.cls && clsText(entryOf(M.byId[pid], slot)) !== l.cls });
+}
+function isLocked(pid, slot, date) { const l = lockOf(pid, slot, date); return !!l && !l.stale; }
+function wantsCover(date, pid, slot) { return absentAt(date, pid, slot) && needsCover(entryOf(M.byId[pid], slot)) && !isLocked(pid, slot, date); }
 
 /* ---------- plans ---------- */
 function plan(date, create) {
@@ -1174,7 +1203,7 @@ function renderShell() {
   document.getElementById('dateIn').value = UI.date;
   const pl = plan(UI.date);
   let need = 0;
-  if (di >= 0) for (const pid of Object.keys(pl.absent)) { const p = M.byId[pid]; if (!p) continue; for (const s of M.dayPeriods[di] || []) if (absentAt(UI.date, pid, s) && needsCover(entryOf(p, s))) { const a = pl.alloc[pid + '|' + s]; if (!a || (!a.cover && !a.supply)) need++; } }
+  if (di >= 0) for (const pid of Object.keys(pl.absent)) { const p = M.byId[pid]; if (!p) continue; for (const s of M.dayPeriods[di] || []) if (wantsCover(UI.date, pid, s)) { const a = pl.alloc[pid + '|' + s]; if (!a || (!a.cover && !a.supply)) need++; } }
   document.getElementById('tabs').innerHTML = TABS.map(([id, label]) => {
     let extra = '';
     if (id === 'plan' && need) extra = `<span class="count" title="Classes still to cover">${need}</span>`;
@@ -1229,7 +1258,7 @@ function renderPlan() {
   const ds = M.dayPeriods[di];
   const absentIds = Object.keys(pl.absent).filter(id => M.byId[id]);
   let total = 0, done = 0;
-  absentIds.forEach(pid => ds.forEach(s => { if (absentAt(date, pid, s) && needsCover(entryOf(M.byId[pid], s))) { total++; const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) done++; } }));
+  absentIds.forEach(pid => ds.forEach(s => { if (wantsCover(date, pid, s)) { total++; const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) done++; } }));
   // previous school day absences to bring forward
   const prev = stepSchoolDay(date, -1), prevPl = S.plans[prev];
   const carry = prevPl ? Object.keys(prevPl.absent).filter(id => !pl.absent[id] && M.byId[id]) : [];
@@ -1275,6 +1304,9 @@ function teacherCard(pid, ds) {
     const a = pl.alloc[pid + '|' + s];
     const nc = !needsCover(list);
     const cls = list.map(e => TT.splitClass(e.t));
+    const lk = lockOf(pid, s, date);
+    if (lk && !lk.stale) return `<button class="tile locked${sel}" data-act="sel" data-pid="${pid}" data-slot="${s}" title="Locked every week${lk.note ? ': ' + esc(lk.note) : ''}">${tri}<span class="p">${slotLabel(s)} · <span class="mono">${esc(list[0].room || '')}</span></span>
+      <span class="c">${esc(cls.map(x => x.cls).join(' / '))}</span><span class="s">${esc(cls.map(x => x.subj).join(' / '))}</span><span class="st">Locked${lk.note ? ': ' + esc(lk.note) : ''}</span><span class="bigl">${PADLOCK}</span></button>`;
     const status = a && (a.cover || a.supply) ? `<span class="st">✓ ${esc(a.cover ? M.byId[a.cover]?.name : a.supply)}${a.room ? ' · ' + esc(a.room) : ''}</span>${a.cover && fullDayOn(date, a.cover, M.slots[s].day) ? '<span class="fulltag">Full day</span>' : ''}`
       : nc ? '<span class="st muted">No cover needed</span>' : '<span class="st">Needs cover</span>';
     const kind = a && (a.cover || a.supply) ? 'done' : nc ? '' : 'need';
@@ -1314,6 +1346,18 @@ function allocPanel(pid, slot) {
   }
   const a = pl.alloc[key] || {};
   const cls = list.map(e => TT.splitClass(e.t));
+  const lk = lockOf(pid, slot, date), dayName = M.days[M.slots[slot].day];
+  const head = `<div class="ah"><h3>${slotLabel(slot)} · ${esc(cls.map(x => x.cls + ' ' + x.subj).join(' / '))} · <span class="mono">${esc(list[0].room || '')}</span></h3><div class="row"><button class="btn small" data-act="closeSel">Close</button></div></div>`;
+  if (lk && !lk.stale) return `<div class="alloc" id="allocPanel">${head}
+    <div class="lockbox">${PADLOCK}<div class="grow"><b>Locked every ${esc(dayName)} ${slotLabel(slot)}: no cover needed</b>
+      ${lk.note ? `<span class="note">${esc(lk.note)}</span>` : ''}<span class="meta">Locked since ${esc(fmtDate(lk.since, { day: 'numeric', month: 'short', year: 'numeric' }))}${lk.until ? ' · until ' + esc(fmtDate(lk.until, { day: 'numeric', month: 'short', year: 'numeric' })) : ' · until unlocked'}</span>
+      <div class="row"><button class="btn danger" data-act="unlock" data-pid="${pid}" data-slot="${slot}">Unlock</button></div></div></div></div>`;
+  const lockForm = `<div class="lockform"><span class="lbl">Lock this period every week</span>
+      <p class="note">For a standing arrangement (classes combined, a department covering it themselves, a known clash). Every ${esc(dayName)} ${slotLabel(slot)} for ${esc(p.name)} is then shown in red with a padlock and never needs cover, until unlocked.</p>
+      <div class="fields"><div><label class="lbl" for="lockNote">Reason</label><input type="text" id="lockNote" placeholder="e.g. Merged with 3G2 in A104"></div>
+        <div><label class="lbl" for="lockUntil">Until (optional)</label><input type="date" id="lockUntil"></div>
+        <div style="align-self:end"><button class="btn danger" data-act="lock" data-pid="${pid}" data-slot="${slot}">${PADLOCK} Lock every week</button></div></div></div>`;
+  const staleBox = lk && lk.stale ? `<div class="discbox">This period was locked for <b>${esc(lk.cls)}</b>${lk.note ? ' (' + esc(lk.note) + ')' : ''}, but the master now has <b>${esc(clsText(list))}</b>, so the lock is paused. <button class="linkbtn" data-act="unlock" data-pid="${pid}" data-slot="${slot}">Remove the old lock</button></div>` : '';
   const { res, cdept } = candidates(date, pid, slot);
   const internal = res.filter(c => c.rel !== 'ext'), external = res.filter(c => c.rel === 'ext');
   const facHasOthers = M.depts.some(d => d !== cdept && fac(d) === fac(cdept));
@@ -1331,13 +1375,13 @@ function allocPanel(pid, slot) {
   const dl = M.disc[key] || [];
   const cur = a.cover || a.supply ? `<div class="current"><span>Covered by</span>${a.cover ? candChipFor(a.cover) : `<span class="chip b-y">${esc(a.supply)}</span>`}${a.room ? `<span>in <b class="mono">${esc(a.room)}</b></span>` : ''}${a.cover && fullDayOn(date, a.cover, M.slots[slot].day) ? '<span class="fulltag">Full day: teaching every period</span>' : ''}<button class="linkbtn" data-act="clearAlloc" data-pid="${pid}" data-slot="${slot}">Remove cover</button></div>` : '';
   const ds = M.dayPeriods[M.slots[slot].day];
-  const nextSlot = ds.find(s => s > slot && absentAt(date, pid, s) && needsCover(entryOf(p, s)) && !(pl.alloc[pid + '|' + s] && (pl.alloc[pid + '|' + s].cover || pl.alloc[pid + '|' + s].supply)));
+  const nextSlot = ds.find(s => s > slot && wantsCover(date, pid, s) && !(pl.alloc[pid + '|' + s] && (pl.alloc[pid + '|' + s].cover || pl.alloc[pid + '|' + s].supply)));
   return `<div class="alloc" id="allocPanel">
     <div class="ah"><h3>${slotLabel(slot)} · ${esc(cls.map(x => x.cls + ' ' + x.subj).join(' / '))} · <span class="mono">${esc(own || '')}</span></h3>
       <div class="row">${nextSlot != null ? `<button class="btn small" data-act="sel" data-pid="${pid}" data-slot="${nextSlot}">Next class needing cover ›</button>` : ''}<button class="btn small" data-act="closeSel">Close</button></div></div>
     <div class="meta">${esc(cdept)} · ${esc(fac(cdept))} faculty</div>
     ${dl.map(x => `<div class="discbox">⚠ ${esc(x.version)} shows <b>${nl(x.other)}</b>${x.room ? ' in ' + esc(x.room) : ''}; the master has <b>${nl(x.master)}</b>.</div>`).join('')}
-    ${cur}
+    ${staleBox}${cur}
     ${nextSlot != null ? `<div class="nextbar"><button class="btn primary" data-act="sel" data-pid="${pid}" data-slot="${nextSlot}">Next class needing cover ›</button></div>` : ''}
     <div class="choices">
       ${column('Internal cover', facHasOthers ? esc(short(cdept)) + ' department, then the rest of ' + esc(fac(cdept)) : esc(short(cdept)) + ' department', internal, intHtml, 'Nobody in the ' + (facHasOthers ? 'faculty' : 'department') + ' is free this period.')}
@@ -1349,6 +1393,7 @@ function allocPanel(pid, slot) {
       <div><label class="lbl" for="noteIn">Note for the cover teacher</label><input type="text" id="noteIn" data-pid="${pid}" data-slot="${slot}" placeholder="e.g. Work on Teams, Chapter 4" value="${esc(a.note || '')}"></div>
     </div>
     <div class="legend">${['g', 'y', 'o', 'r'].map(b => `<span class="chip b-${b}">${BAND_TEXT[b]}</span>`).join('')}<span class="meta">Colours show cover left this week after today's plan.</span></div>
+    ${lockForm}
   </div>`;
 }
 function candChipFor(id) {
@@ -1361,7 +1406,7 @@ function autoFill(mode) {
   const date = UI.date, di = dayIdx(date); if (di < 0) return;
   const pl = plan(date, true), jobs = [];
   for (const s of M.dayPeriods[di]) for (const pid of Object.keys(pl.absent)) {
-    const p = M.byId[pid]; if (!p || !absentAt(date, pid, s) || !needsCover(entryOf(p, s))) continue;
+    const p = M.byId[pid]; if (!p || !wantsCover(date, pid, s)) continue;
     const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) continue;
     jobs.push([pid, s]);
   }
@@ -1386,9 +1431,11 @@ function sheetRows(date) {
   for (const s of ds) for (const pid of Object.keys(pl.absent)) {
     const p = M.byId[pid]; if (!p || !absentAt(date, pid, s)) continue;
     const list = entryOf(p, s); if (!list) continue;
+    const cls = list.map(e => TT.splitClass(e.t));
+    const lk = needsCover(list) && lockOf(pid, s, date);
+    if (lk && !lk.stale) { rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: 'No cover needed', locked: true, coverRoom: list[0].room || '', moved: false, note: lk.note || '' }); continue; }
     const a = pl.alloc[pid + '|' + s];
     if (!needsCover(list) && !(a && (a.cover || a.supply))) continue;
-    const cls = list.map(e => TT.splitClass(e.t));
     rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: a ? (a.cover ? M.byId[a.cover]?.name : a.supply) || '' : '', coverRoom: a && a.room ? a.room : (list[0].room || ''), moved: !!(a && a.room && a.room !== list[0].room), note: a ? a.note || '' : '' });
   }
   return rows;
@@ -1401,7 +1448,7 @@ function sheetGroups(date) {
 function renderSheet() {
   const date = UI.date, groups = sheetGroups(date);
   const absentNames = Object.keys(plan(date).absent).filter(id => M.byId[id]).map(id => M.byId[id].name);
-  const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${esc(t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b></td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
+  const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${esc(t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.locked ? PADLOCK + ' ' : ''}${r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b></td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
   return `<div class="toolbar noprint"><button class="btn primary" data-act="copyHtml">Copy for email</button><button class="btn" data-act="copyText">Copy as plain text</button>
       ${IN_FRAME ? '' : '<button class="btn" data-act="print">Print</button>'}
       <span class="note">Paste into Outlook or Teams to send to all staff.</span></div>
@@ -1573,8 +1620,20 @@ function renderStaff() {
       <li>Promoted staff (Faculty Heads, PTs, PTPS, and anyone with 5+ management periods) go to the bottom of both lists. When a promoted teacher is off, colleagues in the same role (e.g. other PTPS) stay in their normal place in the internal list.</li>
       <li>Head Teacher, Depute Heads, staff marked (MAT), staff with an empty timetable and vacancy rows are left out unless you tick them below.</li>
       <li>Staff who appear under more than one department (e.g. PTPS, ASN) are merged into one timetable.</li></ul></section></div>
+  ${lockList()}
   <div class="sec"><div id="staffEdit"></div><div class="toolbar"><h2 class="grow" style="font-size:1.35rem">Staff</h2><button class="btn primary" data-act="addStaff">Add member of staff</button><input type="search" id="staffQ" placeholder="Filter by name or department" value="${esc(UI.staffQ)}" aria-label="Filter staff"></div>
     <div class="tablewrap"><table class="cards stf" style="--cols:4"><thead><tr><th>Can cover</th><th>Promoted</th><th>Teacher</th><th>Departments</th><th class="num">Classes / week</th><th class="num">Free</th><th class="num">Entitlement</th><th>Cover allowance</th><th></th></tr></thead><tbody id="staffBody"></tbody></table></div></div>`;
+}
+function lockList() {
+  const rows = Object.entries(S.settings.locks || {}).map(([k, l]) => { const [pid, sl] = k.split('|'); return { pid, slot: +sl, l, p: M.byId[pid] }; })
+    .filter(x => x.p && M.slots[x.slot]).sort((x, y) => x.p.name.localeCompare(y.p.name) || x.slot - y.slot);
+  const today = iso(new Date());
+  return `<div class="sec"><h2>${PADLOCK} Locked periods</h2>
+    <p class="note">Periods that never need cover, every week, until unlocked. Lock a period from Plan cover by clicking the class and choosing "Lock every week".</p>
+    <div class="tablewrap"><table class="cards" style="--cols:3"><thead><tr><th>Teacher</th><th>When</th><th>Class</th><th>Reason</th><th>Until</th><th></th></tr></thead><tbody>${rows.length ? rows.map(x => {
+      const lk = lockOf(x.pid, x.slot), ended = x.l.until && x.l.until < today;
+      return `<tr><td class="c-wide"><b>${esc(x.p.name)}</b></td><td>${esc(M.days[M.slots[x.slot].day])} ${slotLabel(x.slot)}</td><td>${esc(x.l.cls)}${lk.stale ? ' <span class="tag warn">Paused: the master now has ' + esc(clsText(entryOf(x.p, x.slot)) || 'nothing') + '</span>' : ''}</td><td>${esc(x.l.note || '')}</td><td>${x.l.until ? esc(fmtDate(x.l.until, { day: 'numeric', month: 'short', year: 'numeric' })) + (ended ? ' <span class="tag">Ended</span>' : '') : 'Until unlocked'}</td><td><button class="btn small danger" data-act="unlock" data-pid="${x.pid}" data-slot="${x.slot}">Unlock</button></td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty">No locked periods.</td></tr>'}</tbody></table></div></div>`;
 }
 function fillStaff() {
   const q = UI.staffQ.toLowerCase();
@@ -1670,7 +1729,7 @@ document.addEventListener('click', e => {
       const inp = document.getElementById('absAdd'); const p = inp.value.trim() && findPerson(inp.value);
       if (!p) { toast('No member of staff called "' + inp.value + '" in the master.'); return; }
       plan(date, true).absent[p.id] = { periods: null }; save();
-      const di = dayIdx(date); const first = (M.dayPeriods[di] || []).find(s => needsCover(entryOf(p, s)));
+      const di = dayIdx(date); const first = (M.dayPeriods[di] || []).find(s => needsCover(entryOf(p, s)) && !isLocked(p.id, s, date));
       UI.sel = first != null ? { pid: p.id, slot: first } : null; render(); break;
     }
     case 'carry': { const prev = S.plans[stepSchoolDay(date, -1)]; const pl = plan(date, true); Object.keys(prev.absent).forEach(id => { if (!pl.absent[id]) pl.absent[id] = { periods: null }; }); save(); render(); break; }
@@ -1743,6 +1802,17 @@ document.addEventListener('click', e => {
     case 'openFile': chooseDataFile(false); break;
     case 'reconnectFile': reconnectFile(); break;
     case 'reconnectAll': reconnectAll(); break;
+    case 'lock': {
+      const k = pid + '|' + slot, today = iso(new Date());
+      S.settings.locks = S.settings.locks || {};
+      S.settings.locks[k] = { cls: clsText(entryOf(M.byId[pid], slot)), note: document.getElementById('lockNote').value.trim(), since: date < today ? date : today, until: document.getElementById('lockUntil').value || '' };
+      for (const [d, pl] of Object.entries(S.plans)) if (d >= date) delete pl.alloc[k];   // cover already arranged from this date on is no longer needed
+      save(); render(); toast(M.byId[pid].name + ' ' + M.days[M.slots[slot].day] + ' ' + slotLabel(slot) + ' locked every week.'); break;
+    }
+    case 'unlock': {
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm unlock'; return; }
+      delete S.settings.locks[pid + '|' + slot]; save(); render(); toast('Unlocked: ' + slotLabel(slot) + ' needs cover again when ' + M.byId[pid].name + ' is off.'); break;
+    }
     case 'linkFolder': chooseFolder(); break;
     case 'scanNow': refreshFolder(false).then(() => toast('Timetables checked.')); break;
     case 'unlinkFolder': if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirm: stop reading the folder'; return; } unlinkFolder(); break;
