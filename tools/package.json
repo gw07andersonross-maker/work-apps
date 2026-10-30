@@ -1,0 +1,7 @@
+{
+  "name": "hgs-cover-planner-tools",
+  "private": true,
+  "description": "Builds the timetables folder into HGS_Cover_Planner.html",
+  "scripts": { "build": "node build-timetables.js" },
+  "dependencies": { "xlsx": "0.18.5" }
+}
