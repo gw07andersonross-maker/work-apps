@@ -55,6 +55,7 @@
   --wm-opacity:.06; color-scheme:dark }
 
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{background:var(--bg)}
 body{color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.45}
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--band)}
@@ -116,6 +117,8 @@ label.lbl{display:block;font-size:.76rem;text-transform:uppercase;letter-spacing
 .ptog{display:flex;flex-wrap:wrap;gap:4px}
 .ptog button{border:1px solid var(--line);background:var(--surface2);border-radius:7px;min-width:34px;padding:3px 0;font-family:var(--f-data);font-size:.8rem;color:var(--muted)}
 .ptog button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.longabs{display:flex;flex-direction:column;align-items:flex-start;gap:4px;background:var(--surface2);border-radius:10px;padding:8px 10px}
+.longabs input{width:100%}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .stat{background:var(--surface2);border-radius:10px;padding:8px 10px}
 .stat b{display:block;font-size:1.4rem;font-variant-numeric:tabular-nums;line-height:1.1}
@@ -1144,7 +1147,17 @@ function plan(date, create) {
   if (!S.plans[date]) { if (!create) return { absent: {}, alloc: {} }; S.plans[date] = { absent: {}, alloc: {} }; }
   return S.plans[date];
 }
-function absentAt(date, pid, slot) { const a = plan(date).absent[pid]; if (!a) return false; return !a.periods || a.periods.includes(slot); }
+/* Longer absences (e.g. a sick line): off every school day from `from` until the day before `back` (no `back`: until further notice).
+   S.settings.longAbs[pid] = { from, back, note }. A day's own entry in plan.absent (periods ticked off) takes precedence. */
+function longAbsOn(date, pid) { const l = (S.settings.longAbs || {})[pid]; return l && date >= l.from && (!l.back || date < l.back) ? l : null; }
+function absentees(date) {
+  const out = {};
+  for (const pid of Object.keys(S.settings.longAbs || {})) if (longAbsOn(date, pid)) out[pid] = { periods: null };
+  return Object.assign(out, plan(date).absent);
+}
+function absentAt(date, pid, slot) { const a = plan(date).absent[pid] || (longAbsOn(date, pid) && { periods: null }); if (!a) return false; return !a.periods || a.periods.includes(slot); }
+// Cover arranged from `from` on for someone who is no longer off is dropped
+function dropAllocsFrom(pid, from) { for (const [d, pl] of Object.entries(S.plans)) if (d >= from) for (const k of Object.keys(pl.alloc)) if (k.startsWith(pid + '|') && !absentAt(d, pid, +k.split('|')[1])) delete pl.alloc[k]; }
 function weekUsage(date, exDate, exKey) {
   const mon = mondayOf(date), u = {};
   for (let i = 0; i < 5; i++) {
@@ -1211,7 +1224,7 @@ function renderShell() {
   document.getElementById('dateIn').value = UI.date;
   const pl = plan(UI.date);
   let need = 0;
-  if (di >= 0) for (const pid of Object.keys(pl.absent)) { const p = M.byId[pid]; if (!p) continue; for (const s of M.dayPeriods[di] || []) if (wantsCover(UI.date, pid, s)) { const a = pl.alloc[pid + '|' + s]; if (!a || (!a.cover && !a.supply)) need++; } }
+  if (di >= 0) for (const pid of Object.keys(absentees(UI.date))) { const p = M.byId[pid]; if (!p) continue; for (const s of M.dayPeriods[di] || []) if (wantsCover(UI.date, pid, s)) { const a = pl.alloc[pid + '|' + s]; if (!a || (!a.cover && !a.supply)) need++; } }
   document.getElementById('tabs').innerHTML = TABS.map(([id, label]) => {
     let extra = '';
     if (id === 'plan' && need) extra = `<span class="count" title="Classes still to cover">${need}</span>`;
@@ -1264,23 +1277,31 @@ function renderPlan() {
   const date = UI.date, di = dayIdx(date), pl = plan(date);
   if (di < 0 || !M.days[di]) return `<div class="panel empty">No timetable for this day. Pick a school day.</div>`;
   const ds = M.dayPeriods[di];
-  const absentIds = Object.keys(pl.absent).filter(id => M.byId[id]);
+  const absNow = absentees(date), absentIds = Object.keys(absNow).filter(id => M.byId[id]);
   let total = 0, done = 0;
   absentIds.forEach(pid => ds.forEach(s => { if (wantsCover(date, pid, s)) { total++; const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) done++; } }));
   // previous school day absences to bring forward
   const prev = stepSchoolDay(date, -1), prevPl = S.plans[prev];
-  const carry = prevPl ? Object.keys(prevPl.absent).filter(id => !pl.absent[id] && M.byId[id]) : [];
+  const carry = prevPl ? Object.keys(prevPl.absent).filter(id => !absNow[id] && M.byId[id]) : [];
   const names = M.people.filter(p => !p.placeholder).map(p => `<option value="${esc(p.name)}">`).join('');
   const aside = `<aside class="panel stack">
     <h2>Absent ${esc(M.days[di])}</h2>
     <div><label class="lbl" for="absAdd">Add a member of staff</label>
       <div class="addrow"><input type="text" id="absAdd" list="staffNames" placeholder="Start typing a name" autocomplete="off"><button class="btn primary" data-act="addAbs">Add</button></div>
-      <datalist id="staffNames">${names}</datalist></div>
+      <datalist id="staffNames">${names}</datalist>
+      <label class="row meta" style="margin-top:8px"><input type="checkbox" id="absLong"> Include in future cover (e.g. sick line submitted)</label>
+      <div id="absLongBox" class="stack" hidden style="margin-top:8px;gap:8px">
+        <div><label class="lbl" for="absBack">Expected back on</label><input type="date" id="absBack" min="${addDays(date, 1)}"><div class="meta">Leave blank if not known yet; they stay in the plan until you set it.</div></div>
+        <div><label class="lbl" for="absNote">Reason</label><input type="text" id="absNote" value="Sick line"></div></div></div>
     ${carry.length ? `<button class="btn small" data-act="carry">Bring forward ${carry.length} absence${carry.length > 1 ? 's' : ''} from ${esc(fmtDate(prev, { weekday: 'long' }))}</button>` : ''}
     ${absentIds.length ? absentIds.map(pid => {
-      const p = M.byId[pid], a = pl.absent[pid];
-      return `<div class="abs"><div class="top"><span class="nm">${esc(p.name)}</span><button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button></div>
-        <div class="meta">${esc(p.depts.map(short).join(' · '))}</div>
+      const p = M.byId[pid], a = absNow[pid], lg = longAbsOn(date, pid);
+      const long = lg ? `<div class="longabs"><span class="tag on">${esc(lg.note || 'Off for longer')}</span> <span class="meta">since ${esc(fmtDate(lg.from, { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
+          <label class="lbl" for="back-${pid}">Expected back on</label><input type="date" id="back-${pid}" class="backIn" data-pid="${pid}" min="${addDays(lg.from, 1)}" value="${esc(lg.back || '')}">
+          <span class="meta">${lg.back ? 'In the cover plan every school day until then.' : 'Return date not known: in the cover plan until it is set.'}</span>
+          <button class="linkbtn" data-act="backToday" data-pid="${pid}">Back today</button></div>` : '';
+      return `<div class="abs"><div class="top"><span class="nm">${esc(p.name)}</span>${lg ? '' : `<button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button>`}</div>
+        <div class="meta">${esc(p.depts.map(short).join(' · '))}</div>${long}
         <div class="ptog" role="group" aria-label="Periods absent">${ds.map(s => `<button data-act="togP" data-pid="${pid}" data-slot="${s}" aria-pressed="${absentAt(date, pid, s)}">${slotLabel(s)}</button>`).join('')}</div>
         ${a.periods ? `<button class="linkbtn" data-act="wholeDay" data-pid="${pid}">Mark whole day</button>` : '<span class="meta">Whole day</span>'}</div>`;
     }).join('') : '<p class="note">Nobody marked absent yet. Add the member of staff who has phoned in and their classes for the day appear here.</p>'}
@@ -1413,7 +1434,7 @@ function candChipFor(id) {
 function autoFill(mode) {
   const date = UI.date, di = dayIdx(date); if (di < 0) return;
   const pl = plan(date, true), jobs = [];
-  for (const s of M.dayPeriods[di]) for (const pid of Object.keys(pl.absent)) {
+  for (const s of M.dayPeriods[di]) for (const pid of Object.keys(absentees(date))) {
     const p = M.byId[pid]; if (!p || !wantsCover(date, pid, s)) continue;
     const a = pl.alloc[pid + '|' + s]; if (a && (a.cover || a.supply)) continue;
     jobs.push([pid, s]);
@@ -1436,7 +1457,7 @@ function autoFill(mode) {
 function sheetRows(date) {
   const di = dayIdx(date); if (di < 0) return [];
   const pl = plan(date), ds = M.dayPeriods[di] || [], rows = [];
-  for (const s of ds) for (const pid of Object.keys(pl.absent)) {
+  for (const s of ds) for (const pid of Object.keys(absentees(date))) {
     const p = M.byId[pid]; if (!p || !absentAt(date, pid, s)) continue;
     const list = entryOf(p, s); if (!list) continue;
     const cls = list.map(e => TT.splitClass(e.t));
@@ -1454,7 +1475,7 @@ function sheetGroups(date) {
 }
 function renderSheet() {
   const date = UI.date, groups = sheetGroups(date);
-  const absentNames = Object.keys(plan(date).absent).filter(id => M.byId[id]).map(id => M.byId[id].name);
+  const absentNames = Object.keys(absentees(date)).filter(id => M.byId[id]).map(id => M.byId[id].name);
   const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${esc(t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b></td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
   return `<div class="toolbar noprint"><button class="btn primary" data-act="copyHtml">Copy for email</button><button class="btn" data-act="copyText">Copy as plain text</button>
       ${IN_FRAME ? '' : '<button class="btn" data-act="print">Print</button>'}
@@ -1467,7 +1488,7 @@ function renderSheet() {
 }
 function sheetEmail(date) {
   const groups = sheetGroups(date);
-  const absentNames = Object.keys(plan(date).absent).filter(id => M.byId[id]).map(id => M.byId[id].name);
+  const absentNames = Object.keys(absentees(date)).filter(id => M.byId[id]).map(id => M.byId[id].name);
   const td = 'style="border:1px solid #bbb;padding:5px 8px;text-align:left;vertical-align:top"';
   const html = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt"><p style="font-size:14pt;color:#252360"><b>Hamilton Grammar School – Cover for ${esc(fmtDate(date))}</b></p>
     <p><b>Staff absent:</b> ${esc(absentNames.join(', ') || 'none recorded')}</p>
@@ -1736,21 +1757,34 @@ document.addEventListener('click', e => {
     case 'addAbs': {
       const inp = document.getElementById('absAdd'); const p = inp.value.trim() && findPerson(inp.value);
       if (!p) { toast('No member of staff called "' + inp.value + '" in the master.'); return; }
-      plan(date, true).absent[p.id] = { periods: null }; save();
+      if (document.getElementById('absLong').checked) {
+        const back = document.getElementById('absBack').value;
+        if (back && back <= date) { toast('The return date needs to be after ' + fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }) + '.'); return; }
+        S.settings.longAbs = S.settings.longAbs || {};
+        S.settings.longAbs[p.id] = { from: date, back: back || '', note: document.getElementById('absNote').value.trim() || 'Off for longer' };
+        toast(p.name + ' is in the cover plan ' + (back ? 'until ' + fmtDate(addDays(back, -1), { weekday: 'long', day: 'numeric', month: 'long' }) : 'until a return date is set') + '.');
+      } else plan(date, true).absent[p.id] = { periods: null };
+      save();
       const di = dayIdx(date); const first = (M.dayPeriods[di] || []).find(s => needsCover(entryOf(p, s)) && !isLocked(p.id, s, date));
       UI.sel = first != null ? { pid: p.id, slot: first } : null; render(); break;
     }
     case 'carry': { const prev = S.plans[stepSchoolDay(date, -1)]; const pl = plan(date, true); Object.keys(prev.absent).forEach(id => { if (!pl.absent[id]) pl.absent[id] = { periods: null }; }); save(); render(); break; }
     case 'rmAbs': { const pl = plan(date, true); delete pl.absent[pid]; Object.keys(pl.alloc).forEach(k => { if (k.startsWith(pid + '|')) delete pl.alloc[k]; }); if (UI.sel && UI.sel.pid === pid) UI.sel = null; save(); render(); break; }
     case 'togP': {
-      const pl = plan(date, true), a = pl.absent[pid], ds = M.dayPeriods[dayIdx(date)];
+      const pl = plan(date, true), a = pl.absent[pid] || (pl.absent[pid] = { periods: null }), ds = M.dayPeriods[dayIdx(date)];
       let set = a.periods ? a.periods.slice() : ds.slice();
       set = set.includes(slot) ? set.filter(s => s !== slot) : set.concat(slot);
       a.periods = set.length === ds.length ? null : set.sort((x, y) => x - y);
       if (!set.includes(slot)) delete pl.alloc[pid + '|' + slot];
       save(); render(); break;
     }
-    case 'wholeDay': plan(date, true).absent[pid].periods = null; save(); render(); break;
+    case 'wholeDay': { const pl = plan(date, true); if (longAbsOn(date, pid)) delete pl.absent[pid]; else pl.absent[pid].periods = null; save(); render(); break; }
+    case 'backToday': {
+      const l = S.settings.longAbs[pid];
+      if (date <= l.from) delete S.settings.longAbs[pid]; else l.back = date;
+      delete plan(date, true).absent[pid]; dropAllocsFrom(pid, date); if (UI.sel && UI.sel.pid === pid) UI.sel = null;
+      save(); render(); toast(M.byId[pid].name + ' is back from ' + fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }) + '.'); break;
+    }
     case 'sel': UI.sel = { pid, slot }; render(); requestAnimationFrame(() => { const el = document.getElementById('allocPanel'); if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }); break;
     case 'closeSel': UI.sel = null; render(); break;
     case 'assign': {
@@ -1836,6 +1870,13 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'dateIn' && t.value) setDate(t.value);
+  else if (t.id === 'absLong') document.getElementById('absLongBox').hidden = !t.checked;
+  else if (t.classList.contains('backIn')) {
+    const l = S.settings.longAbs[t.dataset.pid]; if (!l) return;
+    if (t.value && t.value <= l.from) { toast('The return date needs to be after they went off.'); t.value = l.back || ''; return; }
+    l.back = t.value || ''; if (l.back) dropAllocsFrom(t.dataset.pid, l.back);
+    save(); render(); toast(l.back ? 'Expected back ' + fmtDate(l.back, { weekday: 'long', day: 'numeric', month: 'long' }) + '.' : 'Return date cleared: in the cover plan until it is set.');
+  }
   else if (t.id === 'roomSel') { const pl = plan(UI.date, true), k = t.dataset.pid + '|' + t.dataset.slot; pl.alloc[k] = Object.assign({ cover: null, supply: '', note: '' }, pl.alloc[k], { room: t.value }); save(); render(); }
   else if (t.id === 'noteIn') { const pl = plan(UI.date, true), k = t.dataset.pid + '|' + t.dataset.slot; pl.alloc[k] = Object.assign({ cover: null, supply: '', room: '' }, pl.alloc[k], { note: t.value }); save(); toast('Note saved.'); }
   else if (t.id === 'upMaster' && t.files[0]) uploadMaster(t.files[0]);
