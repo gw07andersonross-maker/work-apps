@@ -1437,8 +1437,7 @@ function sheetRows(date) {
     const p = M.byId[pid]; if (!p || !absentAt(date, pid, s)) continue;
     const list = entryOf(p, s); if (!list) continue;
     const cls = list.map(e => TT.splitClass(e.t));
-    const lk = needsCover(list) && lockOf(pid, s, date);
-    if (lk && !lk.stale) { rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: 'No cover needed', locked: true, coverRoom: list[0].room || '', moved: false, note: lk.note || '' }); continue; }
+    if (isLocked(pid, s, date)) continue;   // standing arrangement: left off the cover sheet and the email
     const a = pl.alloc[pid + '|' + s];
     if (!needsCover(list) && !(a && (a.cover || a.supply))) continue;
     rows.push({ slot: s, period: M.slots[s].period, cls: cls.map(x => x.cls).join(' / '), subj: cls.map(x => x.subj).join(' / '), absent: p.name, room: list[0].room || '', cover: a ? (a.cover ? M.byId[a.cover]?.name : a.supply) || '' : '', coverRoom: a && a.room ? a.room : (list[0].room || ''), moved: !!(a && a.room && a.room !== list[0].room), note: a ? a.note || '' : '' });
@@ -1453,7 +1452,7 @@ function sheetGroups(date) {
 function renderSheet() {
   const date = UI.date, groups = sheetGroups(date);
   const absentNames = Object.keys(plan(date).absent).filter(id => M.byId[id]).map(id => M.byId[id].name);
-  const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${esc(t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.locked ? PADLOCK + ' ' : ''}${r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b>${r.locked ? '<span class="meta noprint"> · locked, not in the email</span>' : ''}</td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
+  const tbody = groups.length ? groups.map(([t, rs]) => rs.map((r, i) => `<tr class="${i === 0 ? 'gstart' : ''}">${i === 0 ? `<td class="c-wide c-group" rowspan="${rs.length}"><b>${esc(t)}</b><div class="meta">${rs.length} class${rs.length > 1 ? 'es' : ''}</div></td>` : ''}<td class="mono">P${r.period}</td><td class="sp3"><b>${esc(r.cls)}</b> ${esc(r.subj)}</td><td class="sp3"><b>${r.cover ? esc(r.cover) : '<span class="warnline">To be confirmed</span>'}</b></td><td class="mono">${esc(r.coverRoom)}${r.moved ? ' <span class="meta">(moved from ' + esc(r.room) + ')</span>' : ''}</td><td class="sp4">${esc(r.note)}</td></tr>`).join('')).join('') : `<tr><td colspan="6" class="empty">No cover planned for this day yet.</td></tr>`;
   return `<div class="toolbar noprint"><button class="btn primary" data-act="copyHtml">Copy for email</button><button class="btn" data-act="copyText">Copy as plain text</button>
       ${IN_FRAME ? '' : '<button class="btn" data-act="print">Print</button>'}
       <span class="note">Paste into Outlook or Teams to send to all staff.</span></div>
@@ -1464,8 +1463,7 @@ function renderSheet() {
     </div>`;
 }
 function sheetEmail(date) {
-  // locked periods are standing arrangements, so they are left out of the email
-  const groups = sheetGroups(date).map(([t, rs]) => [t, rs.filter(r => !r.locked)]).filter(([, rs]) => rs.length);
+  const groups = sheetGroups(date);
   const absentNames = Object.keys(plan(date).absent).filter(id => M.byId[id]).map(id => M.byId[id].name);
   const td = 'style="border:1px solid #bbb;padding:5px 8px;text-align:left;vertical-align:top"';
   const html = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt"><p style="font-size:14pt;color:#252360"><b>Hamilton Grammar School – Cover for ${esc(fmtDate(date))}</b></p>
