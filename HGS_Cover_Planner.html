@@ -118,6 +118,17 @@ label.lbl{display:block;font-size:.76rem;text-transform:uppercase;letter-spacing
 .ptog button{border:1px solid var(--line);background:var(--surface2);border-radius:7px;min-width:34px;padding:3px 0;font-family:var(--f-data);font-size:.8rem;color:var(--muted)}
 .ptog button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .longbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;background:var(--surface2);border-radius:10px;padding:8px 12px}
+.phed{border:2px solid var(--accent);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:12px;background:var(--surface)}
+.phweek{display:flex;flex-direction:column;gap:6px}
+.phscroll{overflow-x:auto}
+table.phgrid{width:auto;border-collapse:separate;border-spacing:4px}
+table.phgrid th,table.phgrid td{padding:0;border:0;background:transparent;position:static;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--ink);vertical-align:middle}
+table.phgrid th{padding-right:6px;white-space:nowrap}
+.phcell{display:block;min-width:70px;border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:.78rem;line-height:1.25;text-align:center}
+button.phcell.in{background:var(--done-bg);border-color:var(--done-bd);color:var(--ok);font-weight:700}
+button.phcell.off{background:var(--need-bg);border-color:var(--need-bd);color:var(--warn)}
+.phcell.na{color:var(--muted);border-style:dashed}
+tr.phout{opacity:.35}
 .longform{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;flex-basis:100%}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .stat{background:var(--surface2);border-radius:10px;padding:8px 10px}
@@ -1150,12 +1161,30 @@ function plan(date, create) {
 /* Longer absences (e.g. a sick line): off every school day from `from` until the day before `back` (no `back`: until further notice).
    S.settings.longAbs[pid] = { from, back, note }. A day's own entry in plan.absent (periods ticked off) takes precedence. */
 function longAbsOn(date, pid) { const l = (S.settings.longAbs || {})[pid]; return l && date >= l.from && (!l.back || date < l.back) ? l : null; }
+/* Phased returns: S.settings.phased[pid] = { from, back, note, weeks: [[slots they are IN], …] }, one pattern per week from the week of
+   `from` (a week not set up repeats the last), until `back` (fully back). On a day with no periods in they are off all day;
+   otherwise they need cover only for the classes they are not in. */
+function phasedOn(date, pid) {
+  const p = (S.settings.phased || {})[pid];
+  if (!p || date < p.from || (p.back && date >= p.back) || dayIdx(date) < 0) return null;
+  const week = Math.min(Math.round((pISO(mondayOf(date)) - pISO(mondayOf(p.from))) / 6048e5), p.weeks.length - 1);
+  return { p, week, inSet: new Set(p.weeks[week] || []) };
+}
+function phasedAbsence(date, pid) {
+  const ph = phasedOn(date, pid); if (!ph) return null;
+  const ds = M.dayPeriods[dayIdx(date)] || [], person = M.byId[pid];
+  if (!ds.some(s => person && entryOf(person, s))) return null;   // no classes that day (part-time, or all free): nothing to cover
+  if (!ds.some(s => ph.inSet.has(s))) return { periods: null };
+  const off = ds.filter(s => person && entryOf(person, s) && !ph.inSet.has(s));
+  return off.length ? { periods: off } : null;
+}
 function absentees(date) {
   const out = {};
   for (const pid of Object.keys(S.settings.longAbs || {})) if (longAbsOn(date, pid)) out[pid] = { periods: null };
+  for (const pid of Object.keys(S.settings.phased || {})) { const a = !out[pid] && phasedAbsence(date, pid); if (a) out[pid] = a; }
   return Object.assign(out, plan(date).absent);
 }
-function absentAt(date, pid, slot) { const a = plan(date).absent[pid] || (longAbsOn(date, pid) && { periods: null }); if (!a) return false; return !a.periods || a.periods.includes(slot); }
+function absentAt(date, pid, slot) { const a = plan(date).absent[pid] || (longAbsOn(date, pid) && { periods: null }) || phasedAbsence(date, pid); if (!a) return false; return !a.periods || a.periods.includes(slot); }
 // Cover arranged from `from` on for someone who is no longer off is dropped
 function dropAllocsFrom(pid, from) { for (const [d, pl] of Object.entries(S.plans)) if (d >= from) for (const k of Object.keys(pl.alloc)) if (k.startsWith(pid + '|') && !absentAt(d, pid, +k.split('|')[1])) delete pl.alloc[k]; }
 function weekUsage(date, exDate, exKey) {
@@ -1185,7 +1214,7 @@ function candidates(date, absentId, slot) {
   const absentRole = promotedRole(M.byId[absentId]);
   for (const p of M.people) {
     if (p.id === absentId || !coverable(p)) continue;
-    if (absentAt(date, p.id, slot)) continue;
+    if (absentAt(date, p.id, slot) || phasedOn(date, p.id)) continue;
     if (p.cells[slot]) continue;
     const covers = coverSlotsOn(date, p.id, key);
     if (covers.includes(slot)) continue;
@@ -1292,8 +1321,10 @@ function renderPlan() {
     ${carry.length ? `<button class="btn small" data-act="carry">Bring forward ${carry.length} absence${carry.length > 1 ? 's' : ''} from ${esc(fmtDate(prev, { weekday: 'long' }))}</button>` : ''}
     ${absentIds.length ? absentIds.map(pid => {
       const p = M.byId[pid], a = absNow[pid], lg = longAbsOn(date, pid);
-      const long = lg ? `<div class="meta"><span class="tag on">${esc(lg.note || 'Off for longer')}</span> ${lg.back ? 'back ' + esc(fmtDate(lg.back, { weekday: 'short', day: 'numeric', month: 'short' })) : 'return date not set'}</div>` : '';
-      return `<div class="abs"><div class="top"><span class="nm">${esc(p.name)}</span>${lg ? '' : `<button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button>`}</div>
+      const ph = !lg && phasedOn(date, pid);
+      const long = lg ? `<div class="meta"><span class="tag on">${esc(lg.note || 'Off for longer')}</span> ${lg.back ? 'back ' + esc(fmtDate(lg.back, { weekday: 'short', day: 'numeric', month: 'short' })) : 'return date not set'}</div>`
+        : ph ? `<div class="meta"><span class="tag on">${esc(ph.p.note || 'Phased return')}</span> ${ph.p.back ? 'fully back ' + esc(fmtDate(ph.p.back, { weekday: 'short', day: 'numeric', month: 'short' })) : 'full return date not set'}</div>` : '';
+      return `<div class="abs"><div class="top"><span class="nm">${esc(p.name)}</span>${lg || ph ? '' : `<button class="linkbtn" data-act="rmAbs" data-pid="${pid}">Remove</button>`}</div>
         <div class="meta">${esc(p.depts.map(short).join(' · '))}</div>${long}
         <div class="ptog" role="group" aria-label="Periods absent">${ds.map(s => `<button data-act="togP" data-pid="${pid}" data-slot="${s}" aria-pressed="${absentAt(date, pid, s)}">${slotLabel(s)}</button>`).join('')}</div>
         ${a.periods ? `<button class="linkbtn" data-act="wholeDay" data-pid="${pid}">Mark whole day</button>` : '<span class="meta">Whole day</span>'}</div>`;
@@ -1341,16 +1372,57 @@ function teacherCard(pid, ds) {
 }
 // Above the classes: put someone into future cover (e.g. a sick line), or show and change how long they are off
 function longBar(pid) {
-  const date = UI.date, lg = longAbsOn(date, pid);
-  if (lg) return `<div class="longbar"><span class="tag on">${esc(lg.note || 'Off for longer')}</span><span class="meta">Off since ${esc(fmtDate(lg.from, { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
+  const date = UI.date, lg = longAbsOn(date, pid), ph = !lg && phasedOn(date, pid);
+  const editor = UI.phDraft && UI.phDraft.pid === pid ? phasedEditor(UI.phDraft) : '';
+  const sd = d => esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }));
+  if (lg) return `<div class="longbar"><span class="tag on">${esc(lg.note || 'Off for longer')}</span><span class="meta">Off since ${sd(lg.from)}</span>
     <label class="row meta" for="back-${pid}">Expected back on <input type="date" id="back-${pid}" class="backIn" data-pid="${pid}" min="${addDays(lg.from, 1)}" value="${esc(lg.back || '')}"></label>
     <span class="meta">${lg.back ? 'In the cover plan every school day until then.' : 'Return date not known: in the cover plan until it is set.'}</span>
-    <button class="btn small" data-act="backToday" data-pid="${pid}">Back today</button></div>`;
+    <button class="btn small" data-act="backToday" data-pid="${pid}">Back today</button>${editor ? '' : `<button class="btn small" data-act="phStart" data-pid="${pid}">Set up a phased return</button>`}</div>${editor}`;
+  if (ph) return `<div class="longbar"><span class="tag on">${esc(ph.p.note || 'Phased return')}</span>
+    <span class="meta">Week ${ph.week + 1}${ph.p.weeks.length > 1 ? ' of ' + ph.p.weeks.length : ''} · started ${sd(ph.p.from)} · ${ph.p.back ? 'fully back ' + sd(ph.p.back) : 'full return date not set'}</span>
+    <span class="meta">Only the classes they are not in need cover.</span>
+    ${editor ? '' : `<button class="btn small" data-act="phStart" data-pid="${pid}">Edit the pattern</button>`}<button class="btn small" data-act="phBackToday" data-pid="${pid}">Fully back today</button></div>${editor}`;
+  if (editor) return editor;
   return `<div class="longbar"><label class="row meta"><input type="checkbox" class="longTog" data-pid="${pid}"> Include in future cover (e.g. sick line submitted)</label>
+    <button class="btn small" data-act="phStart" data-pid="${pid}">Phased return…</button>
     <div class="longform" id="longform-${pid}" hidden><label class="row meta">Expected back on <input type="date" id="absBack-${pid}" min="${addDays(date, 1)}"></label>
       <label class="row meta">Reason <input type="text" id="absNote-${pid}" value="Sick line" style="width:12em"></label>
       <button class="btn small primary" data-act="makeLong" data-pid="${pid}">Add to future cover</button>
       <span class="meta">Leave the date blank if it isn't known yet; they stay in the plan until it is set.</span></div></div>`;
+}
+// Week-by-week grid of the teacher's classes: tick the periods they will be in
+function phasedEditor(d) {
+  const p = M.byId[d.pid], mon0 = mondayOf(d.from);
+  const weeks = d.weeks.map((w, i) => {
+    const set = new Set(w), mon = addDays(mon0, 7 * i);
+    const rows = M.days.map((dn, di) => {
+      const day = addDays(mon, di), outside = day < d.from || (d.back && day >= d.back);
+      const cells = M.dayPeriods[di].map(s => {
+        const c = p.cells[s], l = entryOf(p, s);
+        if (c && c.out) return `<td><span class="phcell na">${slotLabel(s)}<br>not in</span></td>`;
+        if (!l) return `<td><span class="phcell na">${slotLabel(s)}<br>free</span></td>`;
+        const on = set.has(s);
+        return `<td><button class="phcell ${on ? 'in' : 'off'}" data-act="phCell" data-w="${i}" data-slot="${s}" aria-pressed="${on}" ${outside ? 'disabled' : ''}>${slotLabel(s)} ${esc(TT.splitClass(l[0].t).cls)}<br>${on ? 'In' : 'Off'}</button></td>`;
+      }).join('');
+      return `<tr${outside ? ' class="phout"' : ''}><th><button class="linkbtn" data-act="phDay" data-w="${i}" data-day="${di}" ${outside ? 'disabled' : ''}>${esc(dn.slice(0, 3))} ${pISO(day).getDate()}</button></th>${cells}</tr>`;
+    }).join('');
+    return `<div class="phweek"><div class="row"><b>Week ${i + 1}</b><span class="meta">w/c ${esc(fmtDate(mon, { day: 'numeric', month: 'short' }))}${i === d.weeks.length - 1 && !d.back ? ' · repeats until the full return date is set' : ''}</span></div>
+      <div class="phscroll"><table class="phgrid"><tbody>${rows}</tbody></table></div></div>`;
+  }).join('');
+  return `<div class="phed"><div class="row"><b>Phased return for ${esc(p.name)}</b><span class="meta">Tick the periods they will be in. Click a day to switch the whole day. Everything left Off needs cover.</span></div>
+    <div class="row"><label class="row meta">Starts on <input type="date" id="phFrom" value="${esc(d.from)}"></label>
+      <label class="row meta">Fully back on <input type="date" id="phBack" min="${addDays(d.from, 1)}" value="${esc(d.back || '')}"></label>
+      <label class="row meta">Label <input type="text" id="phNote" value="${esc(d.note)}" style="width:11em"></label></div>
+    ${weeks}
+    <div class="row"><button class="btn small" data-act="phAddWeek">Add another week</button>${d.weeks.length > 1 ? '<button class="btn small" data-act="phDelWeek">Remove last week</button>' : ''}
+      <span class="grow"></span><button class="btn" data-act="phCancel">Cancel</button><button class="btn primary" data-act="phSave">Save phased return</button></div></div>`;
+}
+function phWeeksFor(d) {
+  if (!d.back) return;
+  const n = Math.max(1, Math.round((pISO(mondayOf(addDays(d.back, -1))) - pISO(mondayOf(d.from))) / 6048e5) + 1);
+  while (d.weeks.length < n) d.weeks.push(d.weeks[d.weeks.length - 1].slice());
+  d.weeks.length = n;
 }
 function candChip(c) {
   return `<span class="chip b-${c.band}">${esc(c.p.name)}${c.disc ? ' <span title="A department timetable shows this teacher busy this period">⚠</span>' : ''}</span>`;
@@ -1388,7 +1460,7 @@ function allocPanel(pid, slot) {
       ${lk.note ? `<span class="note">${esc(lk.note)}</span>` : ''}<span class="meta">Locked since ${esc(fmtDate(lk.since, { day: 'numeric', month: 'short', year: 'numeric' }))}${lk.until ? ' · until ' + esc(fmtDate(lk.until, { day: 'numeric', month: 'short', year: 'numeric' })) : ' · until unlocked'}</span>
       <div class="row"><button class="btn danger" data-act="unlock" data-pid="${pid}" data-slot="${slot}">Unlock</button></div></div></div></div>`;
   const lockForm = `<div class="lockform"><span class="lbl">Lock this period every week</span>
-      <p class="note">For a standing arrangement (classes combined, a department covering it themselves, a known clash). Every ${esc(dayName)} ${slotLabel(slot)} for ${esc(p.name)} is then shown in red with a padlock and never needs cover, until unlocked.</p>
+      <p class="note">For a standing arrangement (classes combined, a department covering it themselves, a known clash). Every ${esc(dayName)} ${slotLabel(slot)} for ${esc(p.name)} is then shown in pink with a padlock and never needs cover, until unlocked.</p>
       <div class="fields"><div><label class="lbl" for="lockNote">Reason</label><input type="text" id="lockNote" placeholder="e.g. Merged with 3G2 in A104"></div>
         <div><label class="lbl" for="lockUntil">Until (optional)</label><input type="date" id="lockUntil"></div>
         <div style="align-self:end"><button class="btn danger" data-act="lock" data-pid="${pid}" data-slot="${slot}">${PADLOCK} Lock every week</button></div></div></div>`;
@@ -1770,14 +1842,15 @@ document.addEventListener('click', e => {
     case 'carry': { const prev = S.plans[stepSchoolDay(date, -1)]; const pl = plan(date, true); Object.keys(prev.absent).forEach(id => { if (!pl.absent[id]) pl.absent[id] = { periods: null }; }); save(); render(); break; }
     case 'rmAbs': { const pl = plan(date, true); delete pl.absent[pid]; Object.keys(pl.alloc).forEach(k => { if (k.startsWith(pid + '|')) delete pl.alloc[k]; }); if (UI.sel && UI.sel.pid === pid) UI.sel = null; save(); render(); break; }
     case 'togP': {
-      const pl = plan(date, true), a = pl.absent[pid] || (pl.absent[pid] = { periods: null }), ds = M.dayPeriods[dayIdx(date)];
+      const pl = plan(date, true), ds = M.dayPeriods[dayIdx(date)];
+      const a = pl.absent[pid] || (pl.absent[pid] = { periods: ((absentees(date)[pid] || {}).periods || null) });
       let set = a.periods ? a.periods.slice() : ds.slice();
       set = set.includes(slot) ? set.filter(s => s !== slot) : set.concat(slot);
       a.periods = set.length === ds.length ? null : set.sort((x, y) => x - y);
       if (!set.includes(slot)) delete pl.alloc[pid + '|' + slot];
       save(); render(); break;
     }
-    case 'wholeDay': { const pl = plan(date, true); if (longAbsOn(date, pid)) delete pl.absent[pid]; else pl.absent[pid].periods = null; save(); render(); break; }
+    case 'wholeDay': { const pl = plan(date, true); if (longAbsOn(date, pid)) delete pl.absent[pid]; else (pl.absent[pid] = pl.absent[pid] || {}).periods = null; save(); render(); break; }
     case 'makeLong': {
       const back = document.getElementById('absBack-' + pid).value, pl = plan(date, true);
       if (back && back <= date) { toast('The return date needs to be after ' + fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }) + '.'); return; }
@@ -1785,6 +1858,38 @@ document.addEventListener('click', e => {
       S.settings.longAbs[pid] = { from: date, back: back || '', note: document.getElementById('absNote-' + pid).value.trim() || 'Off for longer' };
       if (pl.absent[pid] && !pl.absent[pid].periods) delete pl.absent[pid];   // whole day today: the longer absence covers it
       save(); render(); toast(M.byId[pid].name + ' is in the cover plan ' + (back ? 'until ' + fmtDate(addDays(back, -1), { weekday: 'long', day: 'numeric', month: 'long' }) : 'until a return date is set') + '.'); break;
+    }
+    case 'phStart': {
+      const cur = (S.settings.phased || {})[pid], lg = longAbsOn(date, pid);
+      UI.phDraft = cur ? Object.assign(clone(cur), { pid }) : { pid, from: lg && lg.back && lg.back > date ? lg.back : date, back: '', note: 'Phased return', weeks: [[]] };
+      render(); break;
+    }
+    case 'phCell': { const w = UI.phDraft.weeks[+b.dataset.w], i = w.indexOf(slot); if (i >= 0) w.splice(i, 1); else w.push(slot); render(); break; }
+    case 'phDay': {
+      const p = M.byId[UI.phDraft.pid], w = UI.phDraft.weeks[+b.dataset.w], cls = M.dayPeriods[+b.dataset.day].filter(s => entryOf(p, s));
+      const allIn = cls.every(s => w.includes(s));
+      UI.phDraft.weeks[+b.dataset.w] = allIn ? w.filter(s => !cls.includes(s)) : [...new Set(w.concat(cls))];
+      render(); break;
+    }
+    case 'phAddWeek': { const ws = UI.phDraft.weeks; ws.push(ws[ws.length - 1].slice()); render(); break; }
+    case 'phDelWeek': UI.phDraft.weeks.pop(); render(); break;
+    case 'phCancel': UI.phDraft = null; render(); break;
+    case 'phSave': {
+      const d = UI.phDraft, p = M.byId[d.pid];
+      if (d.back && d.back <= d.from) { toast('The full return date needs to be after the start.'); return; }
+      S.settings.phased = S.settings.phased || {};
+      S.settings.phased[d.pid] = { from: d.from, back: d.back || '', note: d.note.trim() || 'Phased return', weeks: d.weeks.map(w => w.slice().sort((x, y) => x - y)) };
+      const lg = (S.settings.longAbs || {})[d.pid];   // a sick line ends when the phased return starts
+      if (lg) { if (lg.from >= d.from) delete S.settings.longAbs[d.pid]; else if (!lg.back || lg.back > d.from) lg.back = d.from; }
+      for (const [day, pl] of Object.entries(S.plans)) if (day >= d.from && pl.absent[d.pid] && !pl.absent[d.pid].periods) delete pl.absent[d.pid];
+      dropAllocsFrom(d.pid, d.from);
+      UI.phDraft = null; UI.sel = null; save(); render(); toast('Phased return saved for ' + p.name + '.'); break;
+    }
+    case 'phBackToday': {
+      const ph = S.settings.phased[pid];
+      if (date <= ph.from) delete S.settings.phased[pid]; else ph.back = date;
+      delete plan(date, true).absent[pid]; dropAllocsFrom(pid, date); if (UI.sel && UI.sel.pid === pid) UI.sel = null;
+      save(); render(); toast(M.byId[pid].name + ' is fully back from ' + fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }) + '.'); break;
     }
     case 'backToday': {
       const l = S.settings.longAbs[pid];
@@ -1878,6 +1983,9 @@ document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'dateIn' && t.value) setDate(t.value);
   else if (t.classList.contains('longTog')) document.getElementById('longform-' + t.dataset.pid).hidden = !t.checked;
+  else if (t.id === 'phFrom' && UI.phDraft) { if (t.value) { UI.phDraft.from = t.value; phWeeksFor(UI.phDraft); } render(); }
+  else if (t.id === 'phBack' && UI.phDraft) { UI.phDraft.back = t.value || ''; phWeeksFor(UI.phDraft); render(); }
+  else if (t.id === 'phNote' && UI.phDraft) UI.phDraft.note = t.value;
   else if (t.classList.contains('backIn')) {
     const l = S.settings.longAbs[t.dataset.pid]; if (!l) return;
     if (t.value && t.value <= l.from) { toast('The return date needs to be after they went off.'); t.value = l.back || ''; return; }
