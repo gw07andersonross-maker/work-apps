@@ -388,6 +388,13 @@ td.num,th.num{text-align:center}
   .ver .btn{padding:8px 12px}
 }
 
+/* In-page dialogs */
+.dlgwrap{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;padding:16px}
+.dlgback{position:absolute;inset:0;background:rgba(15,14,40,.55)}
+.dlg{position:relative;background:var(--surface);color:var(--ink);border-radius:14px;padding:18px;width:min(460px,100%);display:flex;flex-direction:column;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.dlgmsg{margin:0;white-space:pre-line}
+.dlg .row{justify-content:flex-end}
+.dlgin{width:100%}
 /* Staff names open their timetable */
 .pname{cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;text-decoration-thickness:1px}
 .pname:hover{color:var(--link);text-decoration-style:solid}
@@ -1891,13 +1898,13 @@ function addStanding(abs, slot, cover, from, until, note) {
   return id;
 }
 // Check a teacher can cover a class on a day, asking before overriding a discrepancy or an empty allowance (as Assign does)
-function confirmCover(date, abs, slot, cover) {
+async function confirmCover(date, abs, slot, cover) {
   const c = candidates(date, abs, slot).res.find(x => x.p.id === cover);
   if (!c) { toast(M.byId[cover].name + ' is not free to cover then.'); return null; }
   const warnings = [];
   if (c.disc) warnings.push('A department timetable disagrees with the master for this period.');
   if (c.remaining <= 0) warnings.push('This teacher has no cover allowance left this week.');
-  if (warnings.length && !confirm(warnings.join('\n') + '\n\nOverride these warnings and assign ' + c.p.name + '?')) return null;
+  if (warnings.length && !(await askYes(warnings.join('\n') + '\n\nOverride these warnings and assign ' + c.p.name + '?', 'Assign anyway'))) return null;
   return c;
 }
 function ttCellsFor(p, date, slot) {
@@ -2060,7 +2067,7 @@ function exportData() {
   }
   navigator.clipboard.writeText(txt).then(() => toast('Backup copied. Paste it into a text file or an email to yourself.'), () => showCopyBox(txt));
 }
-function restore(txt) {
+async function restore(txt) {
   if (!canEdit()) { toast('Choose Take editing before restoring a backup.'); return; }
   let d;
   try {
@@ -2070,7 +2077,7 @@ function restore(txt) {
     } else d = o.data || o;
     validateBackup(d);
   } catch (e) { toast('Backup not restored: ' + (e.message || 'invalid file')); return; }
-  if (!confirm('Replace the current plan with this backup? A recovery copy will be kept first.')) return;
+  if (!(await askYes('Replace the current plan with this backup? A recovery copy will be kept first.', 'Replace'))) return;
   rememberRecovery(S, 'Before restoring backup', true);
   ACTION = 'Restore backup'; S = clone(d); S.versions ||= []; S.settings = Object.assign({faculty:{},avail:{},allowance:{}},S.settings);
   save(); buildModel(); render(); toast('Backup restored. Undo is available.');
@@ -2237,18 +2244,17 @@ document.addEventListener('click', e => {
       toast(act === 'ttUndo' ? 'Change undone.' : tp.name + ' ' + slotLabel(slot) + (b.dataset.scope === 'week' ? ' changed for the week of ' + fmtDate(wk, { day: 'numeric', month: 'short' }) + '.' : ' changed for every week.'));
       break;
     }
-    case 'ttCover': {
+    case 'ttCover': (async () => {
       const d = b.dataset.date, abs = b.dataset.abs, sl = UI.tt.cell.slot, k = abs + '|' + sl;
       const until = b.dataset.repeat === '1' ? document.getElementById('ttUntil').value : '';
       if (b.dataset.repeat === '1' && !(until > d)) { toast('Choose the date the repeating cover runs until.'); return; }
-      const c = confirmCover(d, abs, sl, UI.tt.pid); if (!c) return;
+      const c = await confirmCover(d, abs, sl, UI.tt.pid); if (!c) return;
       const pl = plan(d, true), old = pl.alloc[k] || {};
       pl.alloc[k] = { cover: UI.tt.pid, supply: '', room: old.room || '', note: old.note || '', assignedClass: clsText(entryOf(M.byId[abs], sl, d)), discrepancyAck: c.disc ? stable(c.disc) : null, allowanceAck: c.remaining <= 0 ? c.used + 1 : null };
       if (until) pl.alloc[k].standing = addStanding(abs, sl, UI.tt.pid, d, until, old.note);
       ACTION = until ? 'Repeating cover' : 'Cover from timetable';
       save(); render(); toast(c.p.name + ' covers ' + M.byId[abs].name + "'s class" + (until ? ' every ' + M.days[M.slots[sl].day] + ' until ' + fmtDate(until, { day: 'numeric', month: 'short' }) : '') + '.');
-      break;
-    }
+    })(); break;
     case 'repeatCover': case 'ttRepeat': {
       const d = b.dataset.date || date, k = b.dataset.key || pid + '|' + slot, [abs, sl] = k.split('|'), a = plan(d, true).alloc[k];
       const until = document.getElementById(act === 'ttRepeat' ? 'ttUntil' : 'repeatUntil').value;
@@ -2344,12 +2350,36 @@ function goTab(id) {
 function route() { let h = location.hash.replace('#', ''); if (h === 'week') h = 'tracker'; UI.tab = TABS.some(t => t[0] === h) ? h : 'plan'; render(); }
 window.addEventListener('hashchange', route);
 
+/* ---------- in-page dialogs ----------
+   The browser's own prompt/confirm/alert boxes are blocked on some phones and inside the claude.ai preview, so questions are asked in the page. */
+function dialog({ message, input = false, value = '', ok = 'OK', cancel = 'Cancel' }) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div'); wrap.className = 'dlgwrap noprint';
+    wrap.innerHTML = '<div class="dlgback"></div><div class="dlg" role="alertdialog" aria-modal="true"><p class="dlgmsg"></p>' + (input ? '<input type="text" class="dlgin" autocomplete="name">' : '') +
+      '<div class="row">' + (cancel ? '<button type="button" class="btn dlgno"></button>' : '') + '<button type="button" class="btn primary dlgyes"></button></div></div>';
+    wrap.querySelector('.dlgmsg').textContent = message;
+    const yes = wrap.querySelector('.dlgyes'), no = wrap.querySelector('.dlgno'), inp = wrap.querySelector('.dlgin');
+    yes.textContent = ok; if (no) no.textContent = cancel; if (inp) inp.value = value;
+    const done = v => { document.removeEventListener('keydown', key, true); wrap.remove(); resolve(v); };
+    const key = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(input ? null : false); } else if (e.key === 'Enter' && (e.target === inp || e.target === yes)) { e.preventDefault(); done(input ? inp.value : true); } };
+    yes.onclick = () => done(input ? inp.value : true);
+    if (no) no.onclick = () => done(input ? null : false);
+    wrap.querySelector('.dlgback').onclick = () => done(input ? null : (cancel ? false : true));
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(wrap); (inp || yes).focus();
+  });
+}
+const askText = (message, value) => dialog({ message, input: true, value, ok: 'Continue' });
+const askYes = (message, ok) => dialog({ message, ok: ok || 'Yes' });
+const tell = message => dialog({ message, cancel: '' });
+
 /* ---------- reliability, handover and recovery ---------- */
 const EDIT = { id: (globalThis.crypto?.randomUUID?.() || String(Date.now()) + Math.random()), mode: 'view', blocked: false, busy: false };
 const STATUS = { saved: 0, pending: false, error: '', recoveryError: '' };
 let ACTION = 'Edit plan', LAST_STATE = clone(S), undoStack = [], recoveryCopies = [];
 try { recoveryCopies = JSON.parse(localStorage.getItem(LS + '.recovery') || '[]'); if (!Array.isArray(recoveryCopies)) recoveryCopies = []; } catch (_) {}
-function canEdit() { return EDIT.mode === 'edit' && !EDIT.blocked && !EDIT.busy; }
+// With no shared file (e.g. on a phone) there is nobody to hand over to, so this device can always edit
+function canEdit() { return (EDIT.mode === 'edit' || !FILE.handle) && !EDIT.blocked && !EDIT.busy; }
 function acceptState() { LAST_STATE = clone(S); try { localStorage.setItem(LS, JSON.stringify(S)); storageOK = true; } catch (_) { storageOK = false; } }
 function saveStatusText() {
   if (STATUS.error) return STATUS.error;
@@ -2435,8 +2465,8 @@ function checks(date) {
 function safetyMarkup() {
   const rows = M?.version ? checks(UI.date) : [];
   return `<div class="panel noprint" style="margin-bottom:14px" id="safetyBar">
-    <div class="row"><b>${canEdit() ? 'Editing' : 'Viewing mode'}</b><span>${FILE.remoteEditor ? 'Main editor: ' + esc(FILE.remoteEditor.name) : 'No shared editor recorded'}</span>
-    <button class="btn small" data-act="${canEdit() ? 'releaseEditing' : 'takeEditing'}">${canEdit() ? 'Finish editing / hand over' : 'Take editing'}</button>
+    <div class="row">${FILE.handle ? `<b>${canEdit() ? 'Editing' : 'Viewing mode'}</b><span>${FILE.remoteEditor ? 'Main editor: ' + esc(FILE.remoteEditor.name) : 'No shared editor recorded'}</span>
+    <button class="btn small" data-act="${canEdit() ? 'releaseEditing' : 'takeEditing'}">${canEdit() ? 'Finish editing / hand over' : 'Take editing'}</button>` : '<b>Editing on this device</b>'}
     <button class="btn small" data-act="undoChange" ${!canEdit() || !undoStack.length ? 'disabled' : ''}>Undo${undoStack.length ? ': ' + esc(undoStack.at(-1).label) : ''}</button>
     <button class="btn small" data-act="showRecovery">Recovery copies</button>
     ${STATUS.error || EDIT.blocked ? '<button class="btn small" data-act="exportData">Download my backup</button><button class="btn small" data-act="reloadShared">Reload shared plan</button>' : ''}
@@ -2458,14 +2488,15 @@ async function takeEditing() {
   if (EDIT.busy || FILE.busy) { toast('Please wait for the current save to finish.'); return; }
   if (EDIT.blocked) { toast('Download your backup, then reload the shared plan before taking editing.'); return; }
   if (FILE.handle && !FILE.ready) { toast('Reconnect the shared file before taking editing.'); return; }
-  const name = prompt('Your name (shown to colleagues while you edit):', localStorage.getItem(LS+'.editorName') || ''); if (!name?.trim()) return;
+  let saved = ''; try { saved = localStorage.getItem(LS+'.editorName') || ''; } catch (_) {}
+  const name = await askText('Your name (shown to colleagues while you edit):', saved); if (!name?.trim()) return;
   try { localStorage.setItem(LS+'.editorName',name.trim()); } catch (_) {}
   EDIT.busy = true;
   try {
     if (FILE.ready) {
       clearTimeout(FILE.timer);
       const remote=await readDataFile(), prior=FILE.remoteEditor;
-      if (prior && !confirm(prior.name+' is recorded as editor. Only take over after they have finished and the shared folder has synced. Take over now?')) return;
+      if (prior && !(await askYes(prior.name+' is recorded as editor. Only take over after they have finished and the shared folder has synced. Take over now?', 'Take over'))) return;
       rememberRecovery(S,'Before editor handover',false);
       const owner={id:EDIT.id,name:name.trim(),since:new Date().toISOString()};
       const w=await FILE.handle.createWritable(); await w.write(JSON.stringify({app:'hgs-cover',format:2,saved:new Date().toISOString(),editor:owner,docs:remote})); await w.close();
@@ -2518,14 +2549,14 @@ function validateBackup(d) {
   for(const v of d.versions || []) if(!obj(v) || !Array.isArray(v.parsed) || !v.parsed.length || !v.parsed.every(x=>Array.isArray(x.rows)&&Array.isArray(x.slots)&&Array.isArray(x.days))) throw new Error('Invalid timetable in backup.');
   for(const ph of Object.values(d.settings.phased || {})) if(!obj(ph)||!Array.isArray(ph.weeks)||!ph.weeks.length||!ph.weeks.every(w=>Array.isArray(w)&&w.every(Number.isInteger))) throw new Error('Invalid phased return.');
 }
-function outputAllowed() {
+async function outputAllowed() {
   const problems=checks(UI.date);
-  if(problems.length) { alert('Please review the flagged cover allocations before issuing this sheet. Invalid allocations must be reassigned; availability and allowance warnings require an explicit override.');render();return false; }
+  if(problems.length) { await tell('Please review the flagged cover allocations before issuing this sheet. Invalid allocations must be reassigned; availability and allowance warnings require an explicit override.');render();return false; }
   const incomplete=sheetRows(UI.date).filter(r=>!r.cover).length;
-  return !incomplete || confirm(incomplete+' class(es) still need cover. Issue this sheet as an incomplete draft?');
+  return !incomplete || await askYes(incomplete+' class(es) still need cover. Issue this sheet as an incomplete draft?', 'Issue draft');
 }
 const copyOriginal=copyOut;
-copyOut=async function(kind) { if(FILE.ready && !await syncFile(false)) {toast('Check the shared save before issuing cover.');return;} if(outputAllowed()) return copyOriginal(kind); };
+copyOut=async function(kind) { if(FILE.ready && !await syncFile(false)) {toast('Check the shared save before issuing cover.');return;} if(await outputAllowed()) return copyOriginal(kind); };
 // Capture stops read-only mutations before existing delegated handlers execute.
 const viewActions=new Set(['day','today','tab','sel','closeSel','trMode','copyHtml','copyText','print','exportData','pasteBackup','linkFolder','openFile','createFile','reconnectFile','reconnectAll','scanNow','unlinkFolder','unlinkFile','showRecovery','downloadRecovery','closeRecovery','fixAllocation','takeEditing','releaseEditing','reloadShared','retrySave']);
 document.addEventListener('click',e=>{
@@ -2536,13 +2567,13 @@ document.addEventListener('click',e=>{
   if(act==='takeEditing'){stop();takeEditing();}
   else if(act==='releaseEditing'){stop();releaseEditing();}
   else if(act==='retrySave'){stop();syncFile(false);}
-  else if(act==='reloadShared') {stop(); if(!FILE.ready){toast('Reconnect the shared file first.');return;} if(FILE.busy){toast('Wait for saving to finish.');return;} if(confirm('Reload the shared plan? Your local work will be kept as a recovery copy. Download it first if you need a separate backup.')) {rememberRecovery(S,'Before reloading shared plan',false);EDIT.blocked=false;EDIT.mode='view';STATUS.pending=false;undoStack=[];syncFile(true);} }
+  else if(act==='reloadShared') {stop(); if(!FILE.ready){toast('Reconnect the shared file first.');return;} if(FILE.busy){toast('Wait for saving to finish.');return;} askYes('Reload the shared plan? Your local work will be kept as a recovery copy. Download it first if you need a separate backup.','Reload').then(ok=>{if(ok){rememberRecovery(S,'Before reloading shared plan',false);EDIT.blocked=false;EDIT.mode='view';STATUS.pending=false;undoStack=[];syncFile(true);}}); }
   else if(act==='undoChange'){stop();const last=undoStack.pop();if(!last)return;rememberRecovery(S,'Before Undo',true);S=clone(last.data);LAST_STATE=clone(S);saveOriginal();buildModel();render();toast('Undone: '+last.label);}
   else if(act==='showRecovery'){stop();showRecovery();}
   else if(act==='closeRecovery'){stop();document.getElementById('recoveryPanel')?.remove();}
   else if(act==='downloadRecovery' || act==='restoreRecovery'){stop();const item=recoveryCopies.find(x=>x.id===b.dataset.id);if(item){if(act==='downloadRecovery')downloadRecovery(item);else restore(JSON.stringify({data:item.data}));}}
-  else if(act==='fixAllocation'){stop();const [pid,slot]=b.dataset.key.split('|');if(!M.byId[pid]||!M.slots[+slot]||!wantsCover(UI.date,pid,+slot)){toast('This allocation belongs to a removed timetable entry. Remove it below.');if(canEdit()&&confirm('Remove this obsolete cover allocation?')){ACTION='Remove obsolete allocation';delete plan(UI.date,true).alloc[b.dataset.key];save();render();}return;}UI.sel={pid,slot:+slot};UI.tab='plan';render();}
-  else if(act==='print'){stop();(async()=>{if(FILE.ready&&!await syncFile(false))return;if(outputAllowed())window.print();})();}
+  else if(act==='fixAllocation'){stop();const [pid,slot]=b.dataset.key.split('|');if(!M.byId[pid]||!M.slots[+slot]||!wantsCover(UI.date,pid,+slot)){toast('This allocation belongs to a removed timetable entry. Remove it below.');if(canEdit())askYes('Remove this obsolete cover allocation?','Remove').then(ok=>{if(ok){ACTION='Remove obsolete allocation';delete plan(UI.date,true).alloc[b.dataset.key];save();render();}});return;}UI.sel={pid,slot:+slot};UI.tab='plan';render();}
+  else if(act==='print'){stop();(async()=>{if(FILE.ready&&!await syncFile(false))return;if(await outputAllowed())window.print();})();}
   else if(act==='assign') {
     stop();const pid=b.dataset.pid,slot=+b.dataset.slot,cover=b.dataset.cover;
     const c=candidates(UI.date,pid,slot).res.find(x=>x.p.id===cover);
@@ -2550,10 +2581,12 @@ document.addEventListener('click',e=>{
     const warnings=[];
     if(c.disc)warnings.push('A department timetable disagrees with the master for this period.');
     if(c.remaining<=0)warnings.push('This teacher has no cover allowance left this week.');
-    if(warnings.length && !confirm(warnings.join('\n')+'\n\nOverride these warnings and assign '+c.p.name+'?'))return;
-    const key=pid+'|'+slot,pl=plan(UI.date,true),old=pl.alloc[key]||{};
-    pl.alloc[key]={cover,supply:'',room:old.room||'',note:old.note||'',assignedClass:clsText(entryOf(M.byId[pid],slot,UI.date)),discrepancyAck:c.disc?stable(c.disc):null,allowanceAck:c.remaining<=0?c.used+1:null};
-    save();render();toast(c.p.name+' assigned.');
+    const doAssign=()=>{ACTION='assign';
+      const key=pid+'|'+slot,pl=plan(UI.date,true),old=pl.alloc[key]||{};
+      pl.alloc[key]={cover,supply:'',room:old.room||'',note:old.note||'',assignedClass:clsText(entryOf(M.byId[pid],slot,UI.date)),discrepancyAck:c.disc?stable(c.disc):null,allowanceAck:c.remaining<=0?c.used+1:null};
+      save();render();toast(c.p.name+' assigned.');};
+    if(warnings.length) askYes(warnings.join('\n')+'\n\nOverride these warnings and assign '+c.p.name+'?','Assign anyway').then(ok=>{if(ok)doAssign();});
+    else doAssign();
   }
 },true);
 document.addEventListener('change',e=>{
