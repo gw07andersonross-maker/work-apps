@@ -675,7 +675,7 @@ var TT = (function () {
       var mgt = Math.max.apply(null, c.rows.map(function (r) { return r.mgt == null ? 0 : r.mgt; }));
       return { name: name, aliases: c.names, depts: depts, ent: ent, mgt: mgt, fte: fte, baseRoom: baseRoom, cells: c.cells };
     });
-    // disambiguate same display names (e.g. two different C Browns)
+    // disambiguate same display names (two different staff with the same initial and surname)
     var count = {};
     people.forEach(function (p) { count[p.name] = (count[p.name] || 0) + 1; });
     people.forEach(function (p) { if (count[p.name] > 1) p.name = p.name + ' (' + p.depts[0] + ')'; });
